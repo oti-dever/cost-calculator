@@ -4,11 +4,9 @@ version = "0.1.0"
 description = "E-commerce order cost calculator and shop statistics generator"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "pandas>=2.0.0",
-    "openpyxl>=3.1.0",
-    "et_xmlfile",
-    "numpy", 
+license = {text = "Proprietary"}
+authors = [
+    {name = "厦门雾里红电子商务有限公司"}
 ]
 
 [project.scripts]
