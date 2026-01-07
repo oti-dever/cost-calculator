@@ -1,0 +1,19 @@
+[project]
+name = "cost-calculator"
+version = "0.1.0"
+description = "E-commerce order cost calculator and shop statistics generator"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+    "et_xmlfile",
+    "numpy", 
+]
+
+[project.scripts]
+cost-calculator = "cost_calculator:main"
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
