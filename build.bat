@@ -62,10 +62,10 @@ if %errorlevel% neq 0 (
 REM 检查必需的 Python 包
 echo.
 echo [检查] 检查必需的依赖包...
-"!PY_CMD!" -c "import openpyxl, pandas, prompt_toolkit" >nul 2>&1
+"!PY_CMD!" -c "import openpyxl, pandas, textual, rich" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [警告] 缺少必需的包，正在安装 openpyxl、pandas、prompt_toolkit...
-    "!PY_CMD!" -m pip install openpyxl pandas prompt_toolkit
+    echo [警告] 缺少必需的包，正在安装 openpyxl、pandas、textual、rich==13.9.4...
+    "!PY_CMD!" -m pip install openpyxl pandas textual rich==13.9.4
     if !errorlevel! neq 0 (
         echo [错误] 依赖包安装失败
         pause
@@ -75,6 +75,9 @@ if %errorlevel% neq 0 (
 ) else (
     echo [完成] 所有依赖包已安装
 )
+
+REM 固定 rich 版本，避免 PyInstaller + rich 14.x 在 onefile 下的 Unicode 子模块导入问题
+"!PY_CMD!" -m pip install --disable-pip-version-check --quiet rich==13.9.4
 
 REM 清理旧的构建文件
 echo.
@@ -105,15 +108,13 @@ REM 使用 PyInstaller 构建单文件可执行程序
     --clean ^
     --noconfirm ^
     --console ^
-    --hidden-import prompt_toolkit ^
-    --hidden-import prompt_toolkit.completion ^
-    --hidden-import prompt_toolkit.history ^
-    --hidden-import wcwidth ^
+    --hidden-import textual ^
+    --hidden-import rich ^
     --add-data "size_material_price.json;." ^
     --add-data "moving_and_selling_costs.json;." ^
     --add-data "pillow_cost.json;." ^
     --add-data "others.json;." ^
-    cost_calculator.py
+    textual_app.py
 
 REM 检查构建是否成功
 if %errorlevel% neq 0 (
@@ -121,6 +122,17 @@ if %errorlevel% neq 0 (
     echo [错误] PyInstaller 构建失败！请检查上面的错误信息。
     pause
     exit /b %errorlevel%
+)
+
+REM 复制测试数据目录到 dist，便于开箱验证
+if exist "test_excel" (
+    if exist "dist\test_excel" (
+        rmdir /s /q "dist\test_excel"
+    )
+    xcopy /e /i /y "test_excel" "dist\test_excel" >nul
+    echo [完成] 已复制 test_excel 到 dist\test_excel
+) else (
+    echo [提示] 未找到 test_excel 目录，跳过复制
 )
 
 echo.
@@ -143,8 +155,8 @@ echo   - 使用Excel公式实现动态更新
 echo.
 echo 使用方法:
 echo   1. 将 Excel 文件拖放到 CostCalculator.exe 上
-echo   2. CLI example: CostCalculator.exe input.xlsx
-echo   3. 或双击运行后手动输入文件路径
+echo   2. Start exe then input file path in UI
+echo   3. 处理完成后在结果表和日志区查看结果
 echo.
 echo 输入要求:
 echo   - Excel文件必须包含 卖家备注 和 商家/店铺 列

@@ -26,7 +26,8 @@
 
 *   Python 3.10+
 *   依赖库：`pandas`, `openpyxl`
-*   可选增强：`prompt_toolkit`（交互模式 Tab 路径补全 + 输入历史；已包含在 `requirements.txt`）
+*   界面依赖：`textual`（终端图形界面）
+*   打包稳定性建议：`rich==13.9.4`（已在 `requirements.txt` 固定）
 
 ## 安装
 
@@ -39,48 +40,45 @@ pip install -r requirements.txt
 pip install .
 ```
 
-> 说明：如果你不需要 Tab 补全，也可以不安装 `prompt_toolkit`，程序会自动回退到普通输入模式。
+> 说明：本项目当前默认使用 Textual 终端界面；业务计算逻辑保持不变。
 
 ## 使用方法
 
 ### 方式一：命令行运行
 
 ```bash
-python cost_calculator.py "path/to/your/order_file.xlsx"
-```
-
-也支持一次传入多个文件/通配符：
-
-```bash
-python cost_calculator.py "a.xlsx" "b.xlsx"
-python cost_calculator.py "*.xlsx"
-```
-
-### 方式二：交互式运行
-
-直接运行脚本，根据提示输入文件路径：
-
-```bash
 python cost_calculator.py
 ```
 
-交互模式下支持：
+或使用脚本入口：
 
-* 连续处理多个文件：处理完不会自动退出
-* 退出命令：`exit` / `quit` / `q`
-* 常用命令：`help`、`ls`、`cd <目录>`
-* 直接输入目录：自动处理该目录下所有 `.xlsx`/`.xls`（不递归）
-* 批处理汇总：每次输入后自动显示成功/失败/跳过统计
-* 失败清单：失败项会附带原因，便于快速修正后重试
-* 输出策略：
-  * `outdir <目录>` 设置统一输出目录
-  * `outdir reset` 恢复为源文件同目录
-  * `overwrite on/off` 控制同名文件覆盖策略
-* 日志文件：运行时自动写入 `logs/cost_calculator_YYYYMMDD_HHMMSS.log`
+```bash
+cost-calculator
+```
+
+启动后会进入 Textual 界面，在输入框填写文件或目录路径进行处理。
+
+### 方式二：Textual 界面处理
+
+界面支持：
+
+* 输入单个文件或目录
+* 批量输入多个目标（空格分隔，带空格路径请使用引号）
+* 自定义输出目录
+* 同名文件覆盖开关
+* 结果表格与日志面板实时查看
 
 ### 方式三：打包为 EXE (Windows)
 
-如果已经使用 PyInstaller 打包生成了 exe 文件，可以直接将 Excel 文件拖拽到 exe 图标上运行。
+先运行构建脚本：
+
+```bash
+build.bat
+```
+
+构建成功后会生成：`dist/CostCalculator.exe`。
+
+如果已经使用 PyInstaller 打包生成了 exe 文件，双击后会进入 Textual 界面。
 
 当前构建脚本默认生成 **单文件 EXE**（`--onefile`），并且会把以下配置内嵌到可执行文件中：
 
@@ -137,3 +135,4 @@ python cost_calculator.py
 
 *   对于 `.xls` 格式的旧版 Excel 文件，处理后的样式可能无法完全保留，建议使用 `.xlsx`。
 *   海外订单（备注包含 "发海外"）的成本列会被置空，需要人工核对填写。
+*   本次改造仅替换交互层为 Textual，核心成本计算规则与输出逻辑保持不变。

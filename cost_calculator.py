@@ -68,7 +68,7 @@ import re
 import sys
 import glob
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -122,6 +122,30 @@ class ProcessResult:
     matched_count: Optional[int] = None
     total_count: Optional[int] = None
     overseas_count: int = 0
+    unmatched_count: int = 0
+    unmatched_details: List[Dict[str, object]] = field(default_factory=list)
+
+
+ORDER_ID_COLUMN = "订单编号"
+
+
+def _format_cell_text(value) -> str:
+    """将单元格值格式化为字符串。"""
+
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def extract_order_id(row, seller_note: str) -> str:
+    """提取订单编号：仅读取“订单编号”列。"""
+
+    if ORDER_ID_COLUMN in row:
+        cell_text = _format_cell_text(row[ORDER_ID_COLUMN])
+        if cell_text:
+            return cell_text
+
+    return "无"
 
 
 def build_output_file_path(
@@ -1128,8 +1152,9 @@ def process_excel_file(
         grand_total_costs = []  # 总成本
         shop_names = []  # 店铺名称（直接使用"商家/店铺"列去空白）
         overseas_count = 0  # 海外订单计数
+        unmatched_records = []  # 未匹配记录明细
 
-        for idx, row in df.iterrows():
+        for row_number, (_idx, row) in enumerate(df.iterrows(), start=2):
             seller_note = str(row["卖家备注"]) if not pd.isna(row["卖家备注"]) else ""
             shop_column = str(row["商家/店铺"]) if not pd.isna(row["商家/店铺"]) else ""
 
@@ -1157,6 +1182,40 @@ def process_excel_file(
                         others_cost_data,
                     )
                 )
+
+                all_cost_unmatched = all(
+                    value is None
+                    for value in (
+                        base_cost,
+                        dropship_cost,
+                        moving_cost,
+                        pillow_cost,
+                        others_cost,
+                    )
+                )
+
+                mismatch_reasons = []
+                if all_cost_unmatched:
+                    mismatch_reasons.append("基础成本未匹配")
+                else:
+                    if moving_cost is None:
+                        mismatch_reasons.append("义乳/义臀成本匹配失败")
+                    if pillow_cost is None:
+                        mismatch_reasons.append("枕芯成本匹配失败")
+
+                if mismatch_reasons:
+                    order_id = extract_order_id(row, seller_note)
+                    normalized_note = re.sub(r"\s+", " ", seller_note).strip()
+                    if len(normalized_note) > 80:
+                        normalized_note = normalized_note[:77] + "..."
+                    unmatched_records.append(
+                        {
+                            "row_number": row_number,
+                            "order_id": order_id,
+                            "reason": "；".join(mismatch_reasons),
+                            "seller_note": normalized_note,
+                        }
+                    )
 
                 base_costs.append(base_cost if base_cost is not None else "")
                 dropship_costs.append(
@@ -1307,19 +1366,37 @@ def process_excel_file(
         # 统计匹配情况
         matched_count = sum(1 for cost in base_costs if cost != "")
         total_count = len(base_costs)
+        unmatched_count = len(unmatched_records)
         print(f"匹配成功: {matched_count}/{total_count} 条记录")
         if overseas_count > 0:
             print(f"海外订单: {overseas_count} 条（已置空，需手动补全）")
+        if unmatched_count > 0:
+            print(f"未匹配记录: {unmatched_count} 条")
+            for item in unmatched_records:
+                print(
+                    "  行号 {row_number} | 订单编号: {order_id} | 原因: {reason} | 备注: {seller_note}".format(
+                        row_number=item["row_number"],
+                        order_id=item["order_id"],
+                        reason=item["reason"],
+                        seller_note=item["seller_note"] or "(空)",
+                    )
+                )
 
         return ProcessResult(
             input_path=file_path,
             success=True,
             status="success",
-            message="处理成功",
+            message=(
+                f"处理成功（未匹配 {unmatched_count} 条）"
+                if unmatched_count > 0
+                else "处理成功"
+            ),
             output_path=output_file_path,
             matched_count=matched_count,
             total_count=total_count,
             overseas_count=overseas_count,
+            unmatched_count=unmatched_count,
+            unmatched_details=unmatched_records,
         )
 
     except Exception as e:
@@ -1539,199 +1616,16 @@ def _parse_user_input_to_paths(user_input: str, cwd: str) -> List[str]:
 
 
 def main():
-    """主函数"""
-    # 确定数据文件的基本路径（适用于脚本和打包后的exe）
-    if getattr(sys, "frozen", False):
-        # 如果作为打包后的应用运行，基本路径是exe文件所在的目录
-        base_path = os.path.dirname(sys.executable)
-    else:
-        # 如果作为脚本运行，基本路径是脚本所在的目录
-        base_path = os.path.dirname(os.path.abspath(__file__))
+    """主函数（默认启动 Textual 界面）。"""
 
-    # JSON文件路径（支持 exe 内嵌资源）
-    json_path = resolve_resource_path("size_material_price.json")
-    shop_json_path = resolve_resource_path("shop.json")
-    moving_costs_json_path = resolve_resource_path("moving_and_selling_costs.json")
-    pillow_cost_json_path = resolve_resource_path("pillow_cost.json")
-    others_json_path = resolve_resource_path("others.json")
-
-    # 检查必要 JSON 是否存在
-    if not os.path.exists(json_path):
-        print(f"错误: 找不到价格配置文件 {json_path}")
+    try:
+        from textual_app import main as textual_main
+    except Exception as exc:
+        print(f"启动 Textual 界面失败: {exc}")
+        print("请先安装依赖（例如 textual），然后重试。")
         return
 
-    # 配置只加载一次（提升多文件处理效率）
-    print("加载价格数据...")
-    price_data = load_price_data(json_path)
-    print(f"已加载 {len(price_data)} 个类别的价格数据")
-
-    # 店铺数据目前不再使用，但保留旧接口
-    shop_data = load_shop_data(shop_json_path)
-
-    moving_costs_data = load_moving_costs(moving_costs_json_path)
-    if moving_costs_data:
-        print(f"已加载 {len(moving_costs_data)} 条动销成本数据")
-
-    pillow_cost_data = load_pillow_cost(pillow_cost_json_path)
-    if pillow_cost_data:
-        print(f"已加载 {len(pillow_cost_data)} 种尺寸的枕芯成本数据")
-
-    others_cost_data = load_others_cost(others_json_path)
-    if others_cost_data:
-        print(f"已加载 {len(others_cost_data)} 条硅胶/电动成本数据")
-
-    # 会话日志
-    log_path, write_log = create_session_log(base_path)
-    if log_path:
-        print(f"日志文件: {log_path}")
-    write_log("程序启动")
-
-    input_func, tab_enabled = _make_input_func(base_path)
-    if tab_enabled:
-        print("提示: 已启用 Tab 路径补全（prompt_toolkit）")
-    else:
-        print("提示: 未启用 Tab 补全（可安装 prompt_toolkit 获得更佳输入体验）")
-
-    # 输出策略
-    output_options: Dict[str, object] = {
-        "output_dir": None,
-        "overwrite": False,
-    }
-    write_log("输出策略: output_dir=<源文件目录>, overwrite=off")
-
-    # 当前目录：影响相对路径解析与 ls
-    cwd = os.getcwd()
-
-    # 先处理命令行参数（可一次传入多个文件）
-    initial_args = sys.argv[1:]
-    if initial_args:
-        initial_paths = _expand_cli_tokens(initial_args, cwd)
-        batch_results: List[ProcessResult] = []
-        for p in initial_paths:
-            _process_targets = [p]
-            for target in _process_targets:
-                batch_results.extend(
-                    _handle_one_target(
-                    target,
-                    price_data,
-                    shop_data,
-                    moving_costs_data,
-                    pillow_cost_data,
-                    others_cost_data,
-                    output_options,
-                    write_log,
-                )
-                )
-        print_batch_summary(batch_results, write_log)
-
-    print("\n进入交互模式：继续输入文件/目录，或输入 help 查看命令，输入 exit 退出。")
-
-    # 交互式循环处理
-    while True:
-        try:
-            user_input = input_func(f"[{cwd}]> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n收到退出信号，程序结束。")
-            break
-
-        if not user_input:
-            continue
-
-        cmd = user_input.strip().lower()
-        if cmd in {"exit", "quit", "q"}:
-            print("已退出。")
-            write_log("收到退出命令")
-            break
-
-        if cmd in {"help", "?"}:
-            _print_help()
-            continue
-
-        if cmd == "cd" or cmd.startswith("cd "):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) == 1:
-                print(f"当前目录: {cwd}")
-                continue
-            new_dir = _normalize_user_path(parts[1], cwd)
-            if not new_dir or not os.path.isdir(new_dir):
-                print(f"错误: 目录不存在 {new_dir}")
-                continue
-            cwd = new_dir
-            write_log(f"切换目录: {cwd}")
-            continue
-
-        if cmd == "outdir" or cmd.startswith("outdir "):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) == 1:
-                current_outdir = output_options["output_dir"]
-                display_outdir = current_outdir if current_outdir else "<源文件目录>"
-                overwrite_text = "on" if output_options["overwrite"] else "off"
-                print(f"当前输出目录: {display_outdir}")
-                print(f"覆盖策略: overwrite {overwrite_text}")
-                continue
-
-            arg = parts[1].strip()
-            if arg.lower() in {"reset", "clear"}:
-                output_options["output_dir"] = None
-                print("已重置输出目录为源文件目录。")
-                write_log("输出目录重置为源文件目录")
-                continue
-
-            target_outdir = _normalize_user_path(arg, cwd)
-            if not target_outdir:
-                print("错误: 输出目录不能为空")
-                continue
-            try:
-                os.makedirs(target_outdir, exist_ok=True)
-            except Exception as e:
-                print(f"错误: 无法创建输出目录 {target_outdir}，原因: {e}")
-                continue
-            output_options["output_dir"] = target_outdir
-            print(f"已设置输出目录: {target_outdir}")
-            write_log(f"设置输出目录: {target_outdir}")
-            continue
-
-        if cmd == "overwrite on" or cmd == "overwrite off":
-            is_on = cmd.endswith("on")
-            output_options["overwrite"] = is_on
-            print(f"已设置覆盖策略: overwrite {'on' if is_on else 'off'}")
-            write_log(f"覆盖策略变更: overwrite {'on' if is_on else 'off'}")
-            continue
-
-        if cmd == "ls" or cmd.startswith("ls "):
-            parts = user_input.split(maxsplit=1)
-            target_dir = cwd if len(parts) == 1 else _normalize_user_path(parts[1], cwd)
-            excel_files = _list_excel_files(target_dir)
-            if not excel_files:
-                print("未找到 Excel 文件。")
-            else:
-                print("Excel 文件列表：")
-                for f in excel_files:
-                    print(f"  - {f}")
-            continue
-
-        # 普通输入：按路径处理（支持多个/通配符/目录）
-        targets = _parse_user_input_to_paths(user_input, cwd)
-        if not targets:
-            print("未解析到有效路径，请重试（输入 help 查看格式）。")
-            continue
-
-        batch_results: List[ProcessResult] = []
-        for target in targets:
-            batch_results.extend(
-                _handle_one_target(
-                    target,
-                    price_data,
-                    shop_data,
-                    moving_costs_data,
-                    pillow_cost_data,
-                    others_cost_data,
-                    output_options,
-                    write_log,
-                )
-            )
-
-        print_batch_summary(batch_results, write_log)
+    textual_main()
 
 
 def _handle_one_target(
