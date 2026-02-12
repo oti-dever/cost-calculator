@@ -68,8 +68,10 @@ import re
 import sys
 import glob
 import shlex
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 import pandas as pd
@@ -106,6 +108,118 @@ def resolve_resource_path(filename: str) -> str:
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(script_dir, filename)
+
+
+@dataclass
+class ProcessResult:
+    """单个文件处理结果。"""
+
+    input_path: str
+    success: bool
+    status: str
+    message: str
+    output_path: Optional[str] = None
+    matched_count: Optional[int] = None
+    total_count: Optional[int] = None
+    overseas_count: int = 0
+
+
+def build_output_file_path(
+    input_file_path: str,
+    output_dir: Optional[str] = None,
+    overwrite: bool = False,
+) -> str:
+    """构建输出文件路径。
+
+    参数:
+        input_file_path (str): 输入文件路径
+        output_dir (Optional[str]): 输出目录；为空时默认输出到输入文件目录
+        overwrite (bool): 是否允许覆盖同名文件
+
+    返回:
+        str: 最终输出文件路径
+    """
+
+    source_dir = os.path.dirname(input_file_path)
+    target_dir = output_dir if output_dir else source_dir
+    file_name = os.path.basename(input_file_path)
+    name_without_ext, _ext = os.path.splitext(file_name)
+    base_name = f"{name_without_ext}-已处理"
+    output_path = os.path.join(target_dir, f"{base_name}.xlsx")
+
+    if overwrite or not os.path.exists(output_path):
+        return output_path
+
+    index = 1
+    while True:
+        candidate = os.path.join(target_dir, f"{base_name}({index}).xlsx")
+        if not os.path.exists(candidate):
+            return candidate
+        index += 1
+
+
+def create_session_log(base_path: str) -> Tuple[Optional[str], Callable[[str], None]]:
+    """创建会话日志文件，并返回日志函数。"""
+
+    try:
+        logs_dir = os.path.join(base_path, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = os.path.join(logs_dir, f"cost_calculator_{timestamp}.log")
+
+        def _write_log(message: str) -> None:
+            time_prefix = datetime.now().strftime("%H:%M:%S")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{time_prefix}] {message}\n")
+
+        _write_log("日志已启动")
+        return log_path, _write_log
+    except Exception:
+        return None, lambda _msg: None
+
+
+def print_batch_summary(results: List[ProcessResult], write_log: Callable[[str], None]) -> None:
+    """打印批处理汇总与失败清单。"""
+
+    if not results:
+        print("本批次没有可处理项。")
+        write_log("本批次没有可处理项")
+        return
+
+    success_items = [r for r in results if r.status == "success"]
+    failed_items = [r for r in results if r.status == "failed"]
+    skipped_items = [r for r in results if r.status == "skipped"]
+
+    total_files = len(results)
+    total_overseas = sum(r.overseas_count for r in success_items)
+
+    summary_line = (
+        f"批处理汇总: 总计 {total_files} | 成功 {len(success_items)} | "
+        f"失败 {len(failed_items)} | 跳过 {len(skipped_items)}"
+    )
+    print(summary_line)
+    write_log(summary_line)
+
+    if total_overseas > 0:
+        overseas_line = f"海外订单累计: {total_overseas} 条"
+        print(overseas_line)
+        write_log(overseas_line)
+
+    if failed_items:
+        print("失败清单:")
+        write_log("失败清单:")
+        for idx, item in enumerate(failed_items, start=1):
+            line = f"  {idx}. {item.input_path} | 原因: {item.message}"
+            print(line)
+            write_log(line)
+
+    if skipped_items:
+        print("跳过清单:")
+        write_log("跳过清单:")
+        for idx, item in enumerate(skipped_items, start=1):
+            line = f"  {idx}. {item.input_path} | 原因: {item.message}"
+            print(line)
+            write_log(line)
 
 
 def load_price_data(json_path):
@@ -973,17 +1087,14 @@ def process_excel_file(
     moving_costs_data,
     pillow_cost_data,
     others_cost_data,
+    output_dir=None,
+    overwrite=False,
 ):
-    """处理单个Excel文件，输出到新文件"""
+    """处理单个Excel文件，输出到新文件。"""
     print(f"处理文件: {file_path}")
 
-    # 生成输出文件路径
-    file_dir = os.path.dirname(file_path)
-    file_name = os.path.basename(file_path)
-    name_without_ext, ext = os.path.splitext(file_name)
-
-    # 输出文件名：原文件名-已处理.xlsx
-    output_file_path = os.path.join(file_dir, f"{name_without_ext}-已处理.xlsx")
+    # 生成输出文件路径（支持自定义目录与覆盖策略）
+    output_file_path = build_output_file_path(file_path, output_dir, overwrite)
 
     try:
         # 对于 .xls 文件，样式可能无法保留
@@ -999,8 +1110,14 @@ def process_excel_file(
         missing_columns = [col for col in required_columns if col not in df.columns]
 
         if missing_columns:
-            print(f"警告: 文件缺少列 {missing_columns}，跳过处理")
-            return False
+            msg = f"文件缺少列 {missing_columns}"
+            print(f"警告: {msg}，跳过处理")
+            return ProcessResult(
+                input_path=file_path,
+                success=False,
+                status="skipped",
+                message=msg,
+            )
 
         # 计算成本、代发成本、义乳/义臀成本、枕芯成本、硅胶/电动成本，同时识别店铺
         base_costs = []  # 成本
@@ -1078,13 +1195,25 @@ def process_excel_file(
 
             # 检查工作表是否存在
             if sheet is None:
-                print("警告: 无法获取活动工作表,跳过处理")
-                return False
+                msg = "无法获取活动工作表"
+                print(f"警告: {msg},跳过处理")
+                return ProcessResult(
+                    input_path=file_path,
+                    success=False,
+                    status="failed",
+                    message=msg,
+                )
 
             # 检查工作表是否为空
             if sheet.max_row < 1:
-                print("警告: 工作表为空,跳过处理")
-                return False
+                msg = "工作表为空"
+                print(f"警告: {msg},跳过处理")
+                return ProcessResult(
+                    input_path=file_path,
+                    success=False,
+                    status="failed",
+                    message=msg,
+                )
 
             # 将当前sheet重命名为"成本明细"
             sheet.title = "成本明细"
@@ -1092,8 +1221,14 @@ def process_excel_file(
             # 查找或创建表头
             header_row = sheet[1]
             if header_row is None:
-                print("警告: 无法读取表头,跳过处理")
-                return False
+                msg = "无法读取表头"
+                print(f"警告: {msg},跳过处理")
+                return ProcessResult(
+                    input_path=file_path,
+                    success=False,
+                    status="failed",
+                    message=msg,
+                )
 
             header = [cell.value for cell in header_row]
 
@@ -1117,7 +1252,13 @@ def process_excel_file(
             )
 
             if column_indices is None:
-                return False
+                msg = "成本明细列写入失败"
+                return ProcessResult(
+                    input_path=file_path,
+                    success=False,
+                    status="failed",
+                    message=msg,
+                )
 
             (
                 cost_col_idx,
@@ -1153,7 +1294,6 @@ def process_excel_file(
             print(f"已保存处理后的文件: {output_file_path}")
         else:
             # 对于 .xls 文件，使用 pandas 写入，强制输出为 .xlsx
-            output_file_path = os.path.join(file_dir, f"{name_without_ext}-已处理.xlsx")
             # 不再新增店铺编号/店铺名称列，保留原“商家/店铺”列
             df["成本"] = base_costs
             df["代发成本"] = dropship_costs
@@ -1171,11 +1311,26 @@ def process_excel_file(
         if overseas_count > 0:
             print(f"海外订单: {overseas_count} 条（已置空，需手动补全）")
 
-        return True
+        return ProcessResult(
+            input_path=file_path,
+            success=True,
+            status="success",
+            message="处理成功",
+            output_path=output_file_path,
+            matched_count=matched_count,
+            total_count=total_count,
+            overseas_count=overseas_count,
+        )
 
     except Exception as e:
-        print(f"处理文件时出错: {e}")
-        return False
+        error_msg = f"处理文件时出错: {e}"
+        print(error_msg)
+        return ProcessResult(
+            input_path=file_path,
+            success=False,
+            status="failed",
+            message=str(e),
+        )
 
 
 def process_single_file(
@@ -1213,18 +1368,19 @@ def process_single_file(
         print(f"已加载 {len(others_cost_data)} 条硅胶/电动成本数据")
 
     # 处理文件
-    if process_excel_file(
+    result = process_excel_file(
         file_path,
         price_data,
         shop_data,
         moving_costs_data,
         pillow_cost_data,
         others_cost_data,
-    ):
+    )
+    if result.success:
         print(f"\n处理完成！")
         return True
     else:
-        print(f"\n处理失败！")
+        print(f"\n处理失败！原因: {result.message}")
         return False
 
 
@@ -1281,6 +1437,10 @@ def _print_help() -> None:
   exit / quit / q    退出程序
   cd <目录>          切换当前目录（影响相对路径与 ls）
   ls [目录]          列出目录下的 Excel 文件（.xlsx/.xls）
+    outdir             查看当前输出目录策略
+    outdir <目录>      设置输出目录（所有结果统一输出到该目录）
+    outdir reset       重置为“输出到源文件同目录”
+    overwrite on/off   设置同名文件覆盖策略
 
 输入方式：
   - 直接输入 Excel 文件路径（支持拖拽进来）
@@ -1420,11 +1580,24 @@ def main():
     if others_cost_data:
         print(f"已加载 {len(others_cost_data)} 条硅胶/电动成本数据")
 
+    # 会话日志
+    log_path, write_log = create_session_log(base_path)
+    if log_path:
+        print(f"日志文件: {log_path}")
+    write_log("程序启动")
+
     input_func, tab_enabled = _make_input_func(base_path)
     if tab_enabled:
         print("提示: 已启用 Tab 路径补全（prompt_toolkit）")
     else:
         print("提示: 未启用 Tab 补全（可安装 prompt_toolkit 获得更佳输入体验）")
+
+    # 输出策略
+    output_options: Dict[str, object] = {
+        "output_dir": None,
+        "overwrite": False,
+    }
+    write_log("输出策略: output_dir=<源文件目录>, overwrite=off")
 
     # 当前目录：影响相对路径解析与 ls
     cwd = os.getcwd()
@@ -1433,17 +1606,23 @@ def main():
     initial_args = sys.argv[1:]
     if initial_args:
         initial_paths = _expand_cli_tokens(initial_args, cwd)
+        batch_results: List[ProcessResult] = []
         for p in initial_paths:
             _process_targets = [p]
             for target in _process_targets:
-                _handle_one_target(
+                batch_results.extend(
+                    _handle_one_target(
                     target,
                     price_data,
                     shop_data,
                     moving_costs_data,
                     pillow_cost_data,
                     others_cost_data,
+                    output_options,
+                    write_log,
                 )
+                )
+        print_batch_summary(batch_results, write_log)
 
     print("\n进入交互模式：继续输入文件/目录，或输入 help 查看命令，输入 exit 退出。")
 
@@ -1461,6 +1640,7 @@ def main():
         cmd = user_input.strip().lower()
         if cmd in {"exit", "quit", "q"}:
             print("已退出。")
+            write_log("收到退出命令")
             break
 
         if cmd in {"help", "?"}:
@@ -1477,6 +1657,45 @@ def main():
                 print(f"错误: 目录不存在 {new_dir}")
                 continue
             cwd = new_dir
+            write_log(f"切换目录: {cwd}")
+            continue
+
+        if cmd == "outdir" or cmd.startswith("outdir "):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) == 1:
+                current_outdir = output_options["output_dir"]
+                display_outdir = current_outdir if current_outdir else "<源文件目录>"
+                overwrite_text = "on" if output_options["overwrite"] else "off"
+                print(f"当前输出目录: {display_outdir}")
+                print(f"覆盖策略: overwrite {overwrite_text}")
+                continue
+
+            arg = parts[1].strip()
+            if arg.lower() in {"reset", "clear"}:
+                output_options["output_dir"] = None
+                print("已重置输出目录为源文件目录。")
+                write_log("输出目录重置为源文件目录")
+                continue
+
+            target_outdir = _normalize_user_path(arg, cwd)
+            if not target_outdir:
+                print("错误: 输出目录不能为空")
+                continue
+            try:
+                os.makedirs(target_outdir, exist_ok=True)
+            except Exception as e:
+                print(f"错误: 无法创建输出目录 {target_outdir}，原因: {e}")
+                continue
+            output_options["output_dir"] = target_outdir
+            print(f"已设置输出目录: {target_outdir}")
+            write_log(f"设置输出目录: {target_outdir}")
+            continue
+
+        if cmd == "overwrite on" or cmd == "overwrite off":
+            is_on = cmd.endswith("on")
+            output_options["overwrite"] = is_on
+            print(f"已设置覆盖策略: overwrite {'on' if is_on else 'off'}")
+            write_log(f"覆盖策略变更: overwrite {'on' if is_on else 'off'}")
             continue
 
         if cmd == "ls" or cmd.startswith("ls "):
@@ -1497,15 +1716,22 @@ def main():
             print("未解析到有效路径，请重试（输入 help 查看格式）。")
             continue
 
+        batch_results: List[ProcessResult] = []
         for target in targets:
-            _handle_one_target(
-                target,
-                price_data,
-                shop_data,
-                moving_costs_data,
-                pillow_cost_data,
-                others_cost_data,
+            batch_results.extend(
+                _handle_one_target(
+                    target,
+                    price_data,
+                    shop_data,
+                    moving_costs_data,
+                    pillow_cost_data,
+                    others_cost_data,
+                    output_options,
+                    write_log,
+                )
             )
+
+        print_batch_summary(batch_results, write_log)
 
 
 def _handle_one_target(
@@ -1515,55 +1741,115 @@ def _handle_one_target(
     moving_costs_data,
     pillow_cost_data,
     others_cost_data,
-) -> None:
+    output_options: Dict[str, object],
+    write_log: Callable[[str], None],
+) -> List[ProcessResult]:
     """处理一个目标（文件 or 目录）。"""
 
+    results: List[ProcessResult] = []
+
     if not target:
-        return
+        return results
 
     if not os.path.exists(target):
-        print(f"错误: 路径不存在 {target}")
-        return
+        msg = f"路径不存在: {target}"
+        print(f"错误: {msg}")
+        results.append(
+            ProcessResult(
+                input_path=target,
+                success=False,
+                status="failed",
+                message=msg,
+            )
+        )
+        return results
 
     if os.path.isdir(target):
         excel_files = _list_excel_files(target)
         if not excel_files:
-            print(f"目录下未找到 Excel 文件: {target}")
-            return
-        print(f"\n将处理目录: {target}（共 {len(excel_files)} 个文件）")
-        for f in excel_files:
-            _handle_one_target(
-                f,
-                price_data,
-                shop_data,
-                moving_costs_data,
-                pillow_cost_data,
-                others_cost_data,
+            msg = "目录下未找到 Excel 文件"
+            print(f"{msg}: {target}")
+            results.append(
+                ProcessResult(
+                    input_path=target,
+                    success=False,
+                    status="skipped",
+                    message=msg,
+                )
             )
-        return
+            return results
+        print(f"\n将处理目录: {target}（共 {len(excel_files)} 个文件）")
+        write_log(f"目录批处理: {target} | 文件数: {len(excel_files)}")
+        for f in excel_files:
+            results.extend(
+                _handle_one_target(
+                    f,
+                    price_data,
+                    shop_data,
+                    moving_costs_data,
+                    pillow_cost_data,
+                    others_cost_data,
+                    output_options,
+                    write_log,
+                )
+            )
+        return results
 
     # 文件处理
     if not os.path.isfile(target):
-        print(f"错误: 不是文件 {target}")
-        return
+        msg = "不是文件"
+        print(f"错误: {msg} {target}")
+        results.append(
+            ProcessResult(
+                input_path=target,
+                success=False,
+                status="failed",
+                message=msg,
+            )
+        )
+        return results
 
     if not (target.lower().endswith(".xlsx") or target.lower().endswith(".xls")):
-        print(f"跳过: 非 Excel 文件 {target}")
-        return
+        msg = "非 Excel 文件"
+        print(f"跳过: {msg} {target}")
+        results.append(
+            ProcessResult(
+                input_path=target,
+                success=False,
+                status="skipped",
+                message=msg,
+            )
+        )
+        return results
 
     print(f"\n将处理文件: {target}")
-    ok = process_excel_file(
+    write_log(f"开始处理: {target}")
+
+    output_dir = output_options.get("output_dir")
+    overwrite = bool(output_options.get("overwrite"))
+
+    result = process_excel_file(
         target,
         price_data,
         shop_data,
         moving_costs_data,
         pillow_cost_data,
         others_cost_data,
+        output_dir=output_dir,
+        overwrite=overwrite,
     )
-    if ok:
+
+    if result.success:
         print("处理完成。")
+        write_log(
+            f"处理成功: {target} -> {result.output_path} | 匹配 {result.matched_count}/{result.total_count}"
+        )
     else:
-        print("处理失败。")
+        print(f"处理失败。原因: {result.message}")
+        write_log(f"处理失败: {target} | 原因: {result.message}")
+
+    results.append(result)
+    return results
 
 
 if __name__ == "__main__":

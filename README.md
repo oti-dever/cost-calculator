@@ -70,6 +70,13 @@ python cost_calculator.py
 * 退出命令：`exit` / `quit` / `q`
 * 常用命令：`help`、`ls`、`cd <目录>`
 * 直接输入目录：自动处理该目录下所有 `.xlsx`/`.xls`（不递归）
+* 批处理汇总：每次输入后自动显示成功/失败/跳过统计
+* 失败清单：失败项会附带原因，便于快速修正后重试
+* 输出策略：
+  * `outdir <目录>` 设置统一输出目录
+  * `outdir reset` 恢复为源文件同目录
+  * `overwrite on/off` 控制同名文件覆盖策略
+* 日志文件：运行时自动写入 `logs/cost_calculator_YYYYMMDD_HHMMSS.log`
 
 ### 方式三：打包为 EXE (Windows)
 

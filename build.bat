@@ -62,10 +62,10 @@ if %errorlevel% neq 0 (
 REM 检查必需的 Python 包
 echo.
 echo [检查] 检查必需的依赖包...
-"!PY_CMD!" -c "import openpyxl, pandas" >nul 2>&1
+"!PY_CMD!" -c "import openpyxl, pandas, prompt_toolkit" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [警告] 缺少必需的包，正在安装 openpyxl 和 pandas...
-    "!PY_CMD!" -m pip install openpyxl pandas
+    echo [警告] 缺少必需的包，正在安装 openpyxl、pandas、prompt_toolkit...
+    "!PY_CMD!" -m pip install openpyxl pandas prompt_toolkit
     if !errorlevel! neq 0 (
         echo [错误] 依赖包安装失败
         pause
@@ -105,6 +105,10 @@ REM 使用 PyInstaller 构建单文件可执行程序
     --clean ^
     --noconfirm ^
     --console ^
+    --hidden-import prompt_toolkit ^
+    --hidden-import prompt_toolkit.completion ^
+    --hidden-import prompt_toolkit.history ^
+    --hidden-import wcwidth ^
     --add-data "size_material_price.json;." ^
     --add-data "moving_and_selling_costs.json;." ^
     --add-data "pillow_cost.json;." ^
