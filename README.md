@@ -26,6 +26,7 @@
 
 *   Python 3.10+
 *   依赖库：`pandas`, `openpyxl`
+*   可选增强：`prompt_toolkit`（交互模式 Tab 路径补全 + 输入历史；已包含在 `requirements.txt`）
 
 ## 安装
 
@@ -38,12 +39,21 @@ pip install -r requirements.txt
 pip install .
 ```
 
+> 说明：如果你不需要 Tab 补全，也可以不安装 `prompt_toolkit`，程序会自动回退到普通输入模式。
+
 ## 使用方法
 
 ### 方式一：命令行运行
 
 ```bash
 python cost_calculator.py "path/to/your/order_file.xlsx"
+```
+
+也支持一次传入多个文件/通配符：
+
+```bash
+python cost_calculator.py "a.xlsx" "b.xlsx"
+python cost_calculator.py "*.xlsx"
 ```
 
 ### 方式二：交互式运行
@@ -54,9 +64,27 @@ python cost_calculator.py "path/to/your/order_file.xlsx"
 python cost_calculator.py
 ```
 
+交互模式下支持：
+
+* 连续处理多个文件：处理完不会自动退出
+* 退出命令：`exit` / `quit` / `q`
+* 常用命令：`help`、`ls`、`cd <目录>`
+* 直接输入目录：自动处理该目录下所有 `.xlsx`/`.xls`（不递归）
+
 ### 方式三：打包为 EXE (Windows)
 
 如果已经使用 PyInstaller 打包生成了 exe 文件，可以直接将 Excel 文件拖拽到 exe 图标上运行。
+
+当前构建脚本默认生成 **单文件 EXE**（`--onefile`），并且会把以下配置内嵌到可执行文件中：
+
+* `size_material_price.json`
+* `moving_and_selling_costs.json`
+* `pillow_cost.json`
+* `others.json`
+
+因此发布时 `dist` 目录通常只需要保留：
+
+* `CostCalculator.exe`
 
 ## 配置文件说明
 

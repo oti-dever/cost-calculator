@@ -66,9 +66,46 @@ import os
 import json
 import re
 import sys
+import glob
+import shlex
+from pathlib import Path
+from typing import Callable, List, Optional, Sequence, Tuple
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 import pandas as pd
+
+
+def resolve_resource_path(filename: str) -> str:
+    """解析资源文件路径。
+
+    规则：
+    1. 打包运行时（PyInstaller onefile）：
+       - 优先读取 exe 同目录下的外部文件（便于紧急覆盖配置）
+       - 若外部不存在，则读取 exe 内嵌资源（_MEIPASS）
+    2. 脚本运行时：读取脚本同目录文件
+
+    参数:
+        filename (str): 资源文件名
+
+    返回:
+        str: 可访问的资源路径（若均不存在则返回首选候选路径）
+    """
+
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        external_path = os.path.join(exe_dir, filename)
+        if os.path.exists(external_path):
+            return external_path
+
+        bundle_dir = getattr(sys, "_MEIPASS", exe_dir)
+        bundled_path = os.path.join(bundle_dir, filename)
+        if os.path.exists(bundled_path):
+            return bundled_path
+
+        return external_path
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, filename)
 
 
 def load_price_data(json_path):
@@ -1191,6 +1228,156 @@ def process_single_file(
         return False
 
 
+def _make_input_func(base_path: str) -> Tuple[Callable[[str], str], bool]:
+    """创建输入函数。
+
+    优先使用 prompt_toolkit 以支持：
+    - Tab 自动补全路径
+    - 输入历史记录
+
+    如果 prompt_toolkit 不可用，则回退到内置 input()。
+
+    参数:
+        base_path (str): 程序运行目录（脚本目录或 exe 所在目录）
+
+    返回:
+        tuple: (input_func, tab_enabled)
+    """
+
+    try:
+        # 使用动态导入，避免在未安装依赖时触发编辑器的“无法解析导入”提示。
+        import importlib
+
+        prompt_toolkit = importlib.import_module("prompt_toolkit")
+        completion_mod = importlib.import_module("prompt_toolkit.completion")
+        history_mod = importlib.import_module("prompt_toolkit.history")
+
+        PromptSession = getattr(prompt_toolkit, "PromptSession")
+        PathCompleter = getattr(completion_mod, "PathCompleter")
+        FileHistory = getattr(history_mod, "FileHistory")
+
+        history_file = os.path.join(base_path, ".cost_calculator_history")
+        session = PromptSession(
+            completer=PathCompleter(expanduser=True),
+            history=FileHistory(history_file),
+        )
+
+        def _prompt_toolkit_input(prompt_text: str) -> str:
+            return session.prompt(prompt_text)
+
+        return _prompt_toolkit_input, True
+    except Exception:
+        # 任何导入/初始化失败都直接回退，避免影响主流程
+        return input, False
+
+
+def _print_help() -> None:
+    """打印交互模式帮助。"""
+
+    print(
+        """
+可用命令：
+  help / ?           显示帮助
+  exit / quit / q    退出程序
+  cd <目录>          切换当前目录（影响相对路径与 ls）
+  ls [目录]          列出目录下的 Excel 文件（.xlsx/.xls）
+
+输入方式：
+  - 直接输入 Excel 文件路径（支持拖拽进来）
+  - 可一次输入多个路径（用空格分隔；带空格的路径请用引号包住）
+  - 输入目录时，会自动处理该目录下的所有 .xlsx/.xls（不递归）
+  - 支持通配符：例如 *.xlsx
+""".strip()
+    )
+
+
+def _normalize_user_path(raw_path: str, cwd: str) -> str:
+    """规范化用户输入路径。
+
+    - 去掉首尾引号
+    - 展开环境变量与 ~
+    - 相对路径基于 cwd
+    """
+
+    cleaned = raw_path.strip().strip("\"").strip("'")
+    cleaned = os.path.expandvars(os.path.expanduser(cleaned))
+    if not cleaned:
+        return ""
+    if os.path.isabs(cleaned):
+        return os.path.normpath(cleaned)
+    return os.path.normpath(os.path.join(cwd, cleaned))
+
+
+def _expand_cli_tokens(tokens: Sequence[str], cwd: str) -> List[str]:
+    """将 token 扩展为实际路径列表。
+
+    支持：
+    - 通配符（glob）
+    - 相对路径
+    """
+
+    results: List[str] = []
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+
+        # 先规范化，再尝试 glob。
+        norm = _normalize_user_path(token, cwd)
+        if not norm:
+            continue
+
+        # glob 需要保留通配符：如果用户输入包含 * ? [，就按 glob 展开。
+        if any(ch in token for ch in ("*", "?", "[")):
+            matches = glob.glob(norm)
+            if matches:
+                results.extend([os.path.normpath(p) for p in matches])
+            else:
+                results.append(norm)
+        else:
+            results.append(norm)
+
+    # 去重但保序
+    seen = set()
+    deduped: List[str] = []
+    for p in results:
+        if p not in seen:
+            deduped.append(p)
+            seen.add(p)
+    return deduped
+
+
+def _list_excel_files(dir_path: str) -> List[str]:
+    """列出目录下的 Excel 文件（不递归）。"""
+
+    try:
+        p = Path(dir_path)
+        if not p.exists() or not p.is_dir():
+            return []
+        files = []
+        for ext in ("*.xlsx", "*.xls"):
+            files.extend([str(x) for x in p.glob(ext)])
+        files.sort(key=lambda x: x.lower())
+        return files
+    except Exception:
+        return []
+
+
+def _parse_user_input_to_paths(user_input: str, cwd: str) -> List[str]:
+    """把一行用户输入解析成路径列表。
+
+    说明：
+    - 使用 shlex.split 兼容带引号路径
+    - 若解析失败，则把整行当作一个路径
+    """
+
+    try:
+        tokens = shlex.split(user_input, posix=False)
+    except Exception:
+        tokens = [user_input]
+    return _expand_cli_tokens(tokens, cwd)
+
+
 def main():
     """主函数"""
     # 确定数据文件的基本路径（适用于脚本和打包后的exe）
@@ -1201,58 +1388,182 @@ def main():
         # 如果作为脚本运行，基本路径是脚本所在的目录
         base_path = os.path.dirname(os.path.abspath(__file__))
 
-    # JSON文件路径
-    json_path = os.path.join(base_path, "size_material_price.json")
-    shop_json_path = os.path.join(base_path, "shop.json")
-    moving_costs_json_path = os.path.join(base_path, "moving_and_selling_costs.json")
-    pillow_cost_json_path = os.path.join(base_path, "pillow_cost.json")
-    others_json_path = os.path.join(base_path, "others.json")
+    # JSON文件路径（支持 exe 内嵌资源）
+    json_path = resolve_resource_path("size_material_price.json")
+    shop_json_path = resolve_resource_path("shop.json")
+    moving_costs_json_path = resolve_resource_path("moving_and_selling_costs.json")
+    pillow_cost_json_path = resolve_resource_path("pillow_cost.json")
+    others_json_path = resolve_resource_path("others.json")
 
-    # 检查JSON文件是否存在
+    # 检查必要 JSON 是否存在
     if not os.path.exists(json_path):
         print(f"错误: 找不到价格配置文件 {json_path}")
         return
 
-    # 获取目标Excel文件路径 - 支持命令行参数或交互式输入
-    if len(sys.argv) > 1:
-        # 使用命令行参数
-        file_path = sys.argv[1].strip()
+    # 配置只加载一次（提升多文件处理效率）
+    print("加载价格数据...")
+    price_data = load_price_data(json_path)
+    print(f"已加载 {len(price_data)} 个类别的价格数据")
+
+    # 店铺数据目前不再使用，但保留旧接口
+    shop_data = load_shop_data(shop_json_path)
+
+    moving_costs_data = load_moving_costs(moving_costs_json_path)
+    if moving_costs_data:
+        print(f"已加载 {len(moving_costs_data)} 条动销成本数据")
+
+    pillow_cost_data = load_pillow_cost(pillow_cost_json_path)
+    if pillow_cost_data:
+        print(f"已加载 {len(pillow_cost_data)} 种尺寸的枕芯成本数据")
+
+    others_cost_data = load_others_cost(others_json_path)
+    if others_cost_data:
+        print(f"已加载 {len(others_cost_data)} 条硅胶/电动成本数据")
+
+    input_func, tab_enabled = _make_input_func(base_path)
+    if tab_enabled:
+        print("提示: 已启用 Tab 路径补全（prompt_toolkit）")
     else:
-        # 交互式输入
-        file_path = input("请输入要处理的Excel文件路径: ").strip()
+        print("提示: 未启用 Tab 补全（可安装 prompt_toolkit 获得更佳输入体验）")
 
-    # 去除可能的引号
-    file_path = file_path.strip('"').strip("'")
+    # 当前目录：影响相对路径解析与 ls
+    cwd = os.getcwd()
 
-    if not os.path.exists(file_path):
-        print(f"错误: 文件不存在 {file_path}")
+    # 先处理命令行参数（可一次传入多个文件）
+    initial_args = sys.argv[1:]
+    if initial_args:
+        initial_paths = _expand_cli_tokens(initial_args, cwd)
+        for p in initial_paths:
+            _process_targets = [p]
+            for target in _process_targets:
+                _handle_one_target(
+                    target,
+                    price_data,
+                    shop_data,
+                    moving_costs_data,
+                    pillow_cost_data,
+                    others_cost_data,
+                )
+
+    print("\n进入交互模式：继续输入文件/目录，或输入 help 查看命令，输入 exit 退出。")
+
+    # 交互式循环处理
+    while True:
+        try:
+            user_input = input_func(f"[{cwd}]> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n收到退出信号，程序结束。")
+            break
+
+        if not user_input:
+            continue
+
+        cmd = user_input.strip().lower()
+        if cmd in {"exit", "quit", "q"}:
+            print("已退出。")
+            break
+
+        if cmd in {"help", "?"}:
+            _print_help()
+            continue
+
+        if cmd == "cd" or cmd.startswith("cd "):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) == 1:
+                print(f"当前目录: {cwd}")
+                continue
+            new_dir = _normalize_user_path(parts[1], cwd)
+            if not new_dir or not os.path.isdir(new_dir):
+                print(f"错误: 目录不存在 {new_dir}")
+                continue
+            cwd = new_dir
+            continue
+
+        if cmd == "ls" or cmd.startswith("ls "):
+            parts = user_input.split(maxsplit=1)
+            target_dir = cwd if len(parts) == 1 else _normalize_user_path(parts[1], cwd)
+            excel_files = _list_excel_files(target_dir)
+            if not excel_files:
+                print("未找到 Excel 文件。")
+            else:
+                print("Excel 文件列表：")
+                for f in excel_files:
+                    print(f"  - {f}")
+            continue
+
+        # 普通输入：按路径处理（支持多个/通配符/目录）
+        targets = _parse_user_input_to_paths(user_input, cwd)
+        if not targets:
+            print("未解析到有效路径，请重试（输入 help 查看格式）。")
+            continue
+
+        for target in targets:
+            _handle_one_target(
+                target,
+                price_data,
+                shop_data,
+                moving_costs_data,
+                pillow_cost_data,
+                others_cost_data,
+            )
+
+
+def _handle_one_target(
+    target: str,
+    price_data,
+    shop_data,
+    moving_costs_data,
+    pillow_cost_data,
+    others_cost_data,
+) -> None:
+    """处理一个目标（文件 or 目录）。"""
+
+    if not target:
         return
 
-    if not os.path.isfile(file_path):
-        print(f"错误: {file_path} 不是一个文件")
+    if not os.path.exists(target):
+        print(f"错误: 路径不存在 {target}")
         return
 
-    # 检查文件扩展名
-    if not (file_path.endswith(".xlsx") or file_path.endswith(".xls")):
-        print(f"错误: {file_path} 不是一个Excel文件（.xlsx 或 .xls）")
+    if os.path.isdir(target):
+        excel_files = _list_excel_files(target)
+        if not excel_files:
+            print(f"目录下未找到 Excel 文件: {target}")
+            return
+        print(f"\n将处理目录: {target}（共 {len(excel_files)} 个文件）")
+        for f in excel_files:
+            _handle_one_target(
+                f,
+                price_data,
+                shop_data,
+                moving_costs_data,
+                pillow_cost_data,
+                others_cost_data,
+            )
         return
 
-    print(f"\n将处理文件: {file_path}")
-    # 处理单个文件
-    process_single_file(
-        file_path,
-        json_path,
-        shop_json_path,
-        moving_costs_json_path,
-        pillow_cost_json_path,
-        others_json_path,
+    # 文件处理
+    if not os.path.isfile(target):
+        print(f"错误: 不是文件 {target}")
+        return
+
+    if not (target.lower().endswith(".xlsx") or target.lower().endswith(".xls")):
+        print(f"跳过: 非 Excel 文件 {target}")
+        return
+
+    print(f"\n将处理文件: {target}")
+    ok = process_excel_file(
+        target,
+        price_data,
+        shop_data,
+        moving_costs_data,
+        pillow_cost_data,
+        others_cost_data,
     )
-
-    print("\n处理完成。")
-
-    # 只有在交互式模式下才等待按键
-    if len(sys.argv) <= 1:
-        input("按任意键退出...")
+    if ok:
+        print("处理完成。")
+    else:
+        print("处理失败。")
 
 
 if __name__ == "__main__":
