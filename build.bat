@@ -130,10 +130,7 @@ REM 使用 PyInstaller 构建单文件可执行程序
     --console ^
     --hidden-import textual ^
     --hidden-import rich ^
-    --add-data "size_material_price.json;." ^
-    --add-data "moving_and_selling_costs.json;." ^
-    --add-data "pillow_cost.json;." ^
-    --add-data "others.json;." ^
+    --add-data "成本配置模板.xlsx;." ^
     textual_app.py
 
 REM 检查构建是否成功
@@ -166,11 +163,13 @@ echo 可执行文件:
 echo   - CostCalculator.exe
 echo.
 echo 配置文件:
-echo   - 已内嵌到 CostCalculator.exe（无需额外 JSON 文件）
+echo   - 已内嵌成本配置模板.xlsx
+echo   - 首次启动会在 EXE 同目录生成可编辑的成本配置.xlsx
 echo.
 echo 功能说明:
 echo   - 生成两个Sheet: 成本明细 + 店铺统计
 echo   - 支持多种成本类型计算
+echo   - 成本明细包含无法匹配原因说明
 echo   - 使用Excel公式实现动态更新
 echo.
 echo 使用方法:

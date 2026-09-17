@@ -11,34 +11,18 @@ import io
 import os
 import shlex
 from contextlib import redirect_stdout
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
-from cost_calculator import (
-    ProcessResult,
-    load_moving_costs,
-    load_others_cost,
-    load_pillow_cost,
-    load_price_data,
-    load_shop_data,
-    process_excel_file,
-    resolve_resource_path,
+from config_workbook import (
+    CostConfig,
+    ensure_editable_config,
+    load_config_workbook,
 )
+from cost_calculator import ProcessResult, process_excel_file
 
 
 LogFunc = Callable[[str], None]
-
-
-@dataclass
-class LoadedConfig:
-    """已加载的配置数据。"""
-
-    price_data: list
-    shop_data: dict
-    moving_costs_data: list
-    pillow_cost_data: dict
-    others_cost_data: list
 
 
 class CostCalculatorService:
@@ -46,48 +30,24 @@ class CostCalculatorService:
 
     def __init__(self, base_path: Optional[str] = None) -> None:
         self.base_path = base_path or os.getcwd()
-        self.config: Optional[LoadedConfig] = None
+        self.config: Optional[CostConfig] = None
 
-    def load_configs(self, log: Optional[LogFunc] = None) -> LoadedConfig:
-        """加载所有配置文件并缓存结果。"""
+    def load_configs(self, log: Optional[LogFunc] = None) -> CostConfig:
+        """确保外部配置存在，加载、校验并缓存快照。"""
 
         logger = log or (lambda _msg: None)
-
-        json_path = resolve_resource_path("size_material_price.json")
-        shop_json_path = resolve_resource_path("shop.json")
-        moving_costs_json_path = resolve_resource_path(
-            "moving_and_selling_costs.json"
+        config_path = ensure_editable_config()
+        logger(f"正在加载成本配置：{config_path}")
+        config = load_config_workbook(config_path)
+        logger(f"已加载 {len(config.price_data)} 个基础商品类别")
+        logger(
+            f"已加载 {sum(len(value) for value in config.pillow_cost_data.values())} "
+            "条枕芯价格"
         )
-        pillow_cost_json_path = resolve_resource_path("pillow_cost.json")
-        others_json_path = resolve_resource_path("others.json")
+        logger(f"已加载 {len(config.moving_costs_data)} 条义乳/义臀价格")
+        logger(f"已加载 {len(config.others_cost_data)} 条其他成本")
 
-        if not os.path.exists(json_path):
-            raise FileNotFoundError(f"找不到价格配置文件: {json_path}")
-
-        logger("加载价格数据...")
-        price_data = load_price_data(json_path)
-        logger(f"已加载 {len(price_data)} 个类别的价格数据")
-
-        shop_data = load_shop_data(shop_json_path)
-        moving_costs_data = load_moving_costs(moving_costs_json_path)
-        if moving_costs_data:
-            logger(f"已加载 {len(moving_costs_data)} 条动销成本数据")
-
-        pillow_cost_data = load_pillow_cost(pillow_cost_json_path)
-        if pillow_cost_data:
-            logger(f"已加载 {len(pillow_cost_data)} 种尺寸的枕芯成本数据")
-
-        others_cost_data = load_others_cost(others_json_path)
-        if others_cost_data:
-            logger(f"已加载 {len(others_cost_data)} 条硅胶/电动成本数据")
-
-        self.config = LoadedConfig(
-            price_data=price_data,
-            shop_data=shop_data,
-            moving_costs_data=moving_costs_data,
-            pillow_cost_data=pillow_cost_data,
-            others_cost_data=others_cost_data,
-        )
+        self.config = config
         return self.config
 
     @staticmethod
@@ -147,13 +107,6 @@ class CostCalculatorService:
         files.sort(key=lambda x: x.lower())
         return files
 
-    def _ensure_config(self) -> LoadedConfig:
-        """确保配置已加载。"""
-
-        if self.config is None:
-            return self.load_configs()
-        return self.config
-
     def process_targets(
         self,
         targets: Sequence[str],
@@ -164,7 +117,9 @@ class CostCalculatorService:
         """批量处理文件或目录目标。"""
 
         logger = log or (lambda _msg: None)
-        cfg = self._ensure_config()
+        # 每个批次开始前都重新读取，使使用者保存的价格立即生效。
+        # 任何加载或校验错误都会在处理任何订单前抛出。
+        cfg = self.load_configs(log=logger)
 
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
@@ -188,7 +143,7 @@ class CostCalculatorService:
         target: str,
         output_dir: Optional[str],
         overwrite: bool,
-        cfg: LoadedConfig,
+        cfg: CostConfig,
         log: LogFunc,
     ) -> List[ProcessResult]:
         """处理单个目标（文件或目录）。"""
@@ -267,7 +222,7 @@ class CostCalculatorService:
         target: str,
         output_dir: Optional[str],
         overwrite: bool,
-        cfg: LoadedConfig,
+        cfg: CostConfig,
         log: LogFunc,
     ) -> ProcessResult:
         """调用核心处理函数并捕获标准输出写入日志。"""
@@ -277,10 +232,11 @@ class CostCalculatorService:
             result = process_excel_file(
                 target,
                 cfg.price_data,
-                cfg.shop_data,
                 cfg.moving_costs_data,
                 cfg.pillow_cost_data,
                 cfg.others_cost_data,
+                dropship_unit_cost=cfg.dropship_unit_cost,
+                dropship_keywords=cfg.dropship_keywords,
                 output_dir=output_dir,
                 overwrite=overwrite,
             )

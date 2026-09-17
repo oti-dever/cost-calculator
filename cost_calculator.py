@@ -8,11 +8,9 @@ Excel文件处理脚本 - 成本计算与店铺统计
 
 核心功能：
 1. 成本计算
-   - 基础成本：根据size_material_price.json中的尺寸、材质、关键词匹配计算
-   - 代发成本：识别"枕芯"、"yr"/"义乳"、"yt"/"义臀"等关键词，每个加5.5元
-   - 义乳/义臀成本：从moving_and_selling_costs.json匹配完整remark计算
-   - 枕芯成本：从pillow_cost.json匹配尺寸+枕芯类型计算
-   - 硅胶/电动成本：从others.json匹配关键词计算
+   - 基础成本：根据「成本配置.xlsx」中的尺寸、材质、关键词匹配计算
+   - 代发成本：识别"枕芯"、"yr"/"义乳"、"yt"/"义臀"等关键词
+   - 义乳/义臀、枕芯、硅胶/电动成本均由统一 Excel 配置加载
 
 2. 店铺识别
    - 自动从"商家/店铺"列提取店铺名称（去空白、规范化处理）
@@ -22,7 +20,7 @@ Excel文件处理脚本 - 成本计算与店铺统计
    a) 成本明细Sheet
       - 保留原始数据的所有列
       - 新增列：成本、代发成本、总成本（=成本+代发成本）
-      - 新增列（空列后）：义乳/义臀成本、枕芯成本、硅胶/电动成本
+      - 新增列（空列后）：义乳/义臀成本、枕芯成本、硅胶/电动成本、无法匹配原因说明
       - 底部添加合计行，使用SUM公式汇总各成本列
 
    b) 店铺统计Sheet
@@ -40,11 +38,7 @@ Excel文件处理脚本 - 成本计算与店铺统计
 - Excel文件必须包含"卖家备注"和"商家/店铺"列
 - 支持.xlsx和.xls格式（.xls可能无法保留原始样式）
 
-配置文件（位于脚本同目录）：
-- size_material_price.json：基础价格配置
-- moving_and_selling_costs.json：义乳/义臀成本配置
-- pillow_cost.json：枕芯成本配置
-- others.json：硅胶/电动成本配置
+配置文件：「成本配置.xlsx」（首次运行从内嵌模板自动生成）
 
 输出文件：
 - 文件名：${原文件名}-已处理.xlsx
@@ -63,51 +57,14 @@ Excel文件处理脚本 - 成本计算与店铺统计
 """
 
 import os
-import json
 import re
-import sys
-import glob
-import shlex
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from openpyxl import load_workbook
+from openpyxl.styles import Alignment
 from openpyxl.utils import get_column_letter
 import pandas as pd
-
-
-def resolve_resource_path(filename: str) -> str:
-    """解析资源文件路径。
-
-    规则：
-    1. 打包运行时（PyInstaller onefile）：
-       - 优先读取 exe 同目录下的外部文件（便于紧急覆盖配置）
-       - 若外部不存在，则读取 exe 内嵌资源（_MEIPASS）
-    2. 脚本运行时：读取脚本同目录文件
-
-    参数:
-        filename (str): 资源文件名
-
-    返回:
-        str: 可访问的资源路径（若均不存在则返回首选候选路径）
-    """
-
-    if getattr(sys, "frozen", False):
-        exe_dir = os.path.dirname(sys.executable)
-        external_path = os.path.join(exe_dir, filename)
-        if os.path.exists(external_path):
-            return external_path
-
-        bundle_dir = getattr(sys, "_MEIPASS", exe_dir)
-        bundled_path = os.path.join(bundle_dir, filename)
-        if os.path.exists(bundled_path):
-            return bundled_path
-
-        return external_path
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, filename)
 
 
 @dataclass
@@ -124,6 +81,32 @@ class ProcessResult:
     overseas_count: int = 0
     unmatched_count: int = 0
     unmatched_details: List[Dict[str, object]] = field(default_factory=list)
+
+
+@dataclass
+class MatchResult:
+    """卖家备注的成本匹配结果及字段级诊断。"""
+
+    base_cost: Optional[float]
+    dropship_cost: Optional[float]
+    total_cost: Optional[float]
+    moving_cost: Optional[float]
+    pillow_cost: Optional[float]
+    other_cost: Optional[float]
+    matched_any: bool = False
+    failure_reasons: List[str] = field(default_factory=list)
+
+    def as_tuple(self):
+        """返回与旧版 ``match_price`` 一致的六元组。"""
+
+        return (
+            self.base_cost,
+            self.dropship_cost,
+            self.total_cost,
+            self.moving_cost,
+            self.pillow_cost,
+            self.other_cost,
+        )
 
 
 ORDER_ID_COLUMN = "订单编号"
@@ -246,83 +229,6 @@ def print_batch_summary(results: List[ProcessResult], write_log: Callable[[str],
             write_log(line)
 
 
-def load_price_data(json_path):
-    """加载并根据优先级排序价格数据"""
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        # 根据 "priority" 字段对类别进行排序
-        return sorted(data, key=lambda x: x.get("priority", 99))
-
-
-def load_shop_data(json_path):
-    """兼容旧接口：不再使用 shop.json，始终返回空字典"""
-    print("提示: 店铺统计改为自动整理‘商家/店铺’列，不再读取 shop.json。")
-    return {}
-
-
-def load_moving_costs(json_path):
-    """加载动销成本数据"""
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"警告: 找不到动销成本配置文件 {json_path}，将跳过动销成本功能")
-        return []
-
-
-def load_pillow_cost(json_path):
-    """加载枕芯成本数据"""
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"警告: 找不到枕芯成本配置文件 {json_path}，将跳过枕芯成本功能")
-        return {}
-
-
-def load_others_cost(json_path):
-    """加载硅胶/电动成本数据"""
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"警告: 找不到硅胶/电动成本配置文件 {json_path}，将跳过硅胶/电动成本功能")
-        return []
-
-
-def identify_shop(text, shop_data):
-    """
-    识别文本中的店铺名称（从商家/店铺列进行包含匹配，左起最先命中）。
-
-    规则：
-    - 仅使用店铺名称进行识别（不使用编号解析）。
-    - 规范化：移除空白（含全角）、转为小写，以提升兼容度。
-    - 匹配方式：从左到右，返回最先出现的店铺名称。
-
-    参数:
-        text (str): 商家/店铺列的文本
-        shop_data (dict): 店铺编号到店铺名称的映射
-
-    返回:
-        str: 店铺名称，如果未找到则返回 None
-    """
-    if pd.isna(text) or not text:
-        return None
-
-    # 规范化：去空白（半角/全角）、小写
-    text_str = re.sub(r"\s+|\u3000", "", str(text)).lower()
-
-    # 构造候选名称列表
-    name_candidates = list(shop_data.values())
-
-    # 使用从左到右的最先匹配策略
-    matched, _pos = find_leftmost_match(text_str, name_candidates)
-    if matched is not None:
-        return matched
-
-    return None
-
-
 def find_leftmost_match(text, candidates):
     """
     从左向右找第一个（最左边）匹配的候选项
@@ -378,207 +284,313 @@ def find_longest_match_at_leftmost(text, candidates):
     return best_match, best_pos
 
 
-def match_price(
+DEFAULT_DROPSHIP_KEYWORDS = ("枕芯", "yr", "义乳", "yt", "义臀")
+
+
+def _reason_fragment(text: str, max_length: int = 40) -> str:
+    """生成适合写入 Excel 的短备注片段。"""
+
+    normalized = re.sub(r"\s+", " ", str(text)).strip()
+    if not normalized:
+        return "(空)"
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max_length - 3] + "..."
+
+
+def _base_size_formats(size: str) -> List[str]:
+    return [size.lower(), size.lower().replace("*", "x"), size.lower().replace("*", "")]
+
+
+def _diagnose_base_failure(
+    item_text_lower: str,
+    quantity: int,
+    keyword_seen: bool,
+    keyword_size_seen: bool,
+    price_data: list,
+) -> Optional[str]:
+    """判断基础商品匹配停在哪个字段。"""
+
+    if keyword_seen:
+        if not keyword_size_seen:
+            return "缺少或不支持尺寸"
+        return "缺少或不支持材质"
+
+    known_sizes = {
+        size_format
+        for category in price_data
+        for product in category.get("products", [])
+        for size_format in _base_size_formats(str(product.get("尺寸", "")))
+        if size_format
+    }
+    known_materials = {
+        str(material).lower()
+        for category in price_data
+        for product in category.get("products", [])
+        for material in product.get("价格", {})
+    }
+    size_seen = any(size and size in item_text_lower for size in known_sizes)
+    material_seen = any(
+        material and material in item_text_lower for material in known_materials
+    )
+
+    # 有逗号时，旧规则认为该分段必须存在基础商品；没有逗号时，仅在尺寸和材质
+    # 都明显存在的情况下判断为缺少商品类型，避免把普通说明文字误报为枕套。
+    if quantity > 0 or (size_seen and material_seen):
+        return "未识别商品类型关键词"
+    return None
+
+
+def match_price_detailed(
     text,
     price_data,
     moving_costs_data=None,
     pillow_cost_data=None,
     others_cost_data=None,
-):
-    """
-    根据文本内容（卖家备注）匹配价格并计算所有成本。
+    dropship_unit_cost: float = 5.5,
+    dropship_keywords: Optional[Sequence[str]] = None,
+) -> MatchResult:
+    """匹配一条卖家备注，并返回成本及字段级失败原因。"""
 
-    一条记录的处理逻辑：
-    1. 将输入文本按分隔符（'。'）分割成多个独立的订单项。
-    2. 对每个订单项：
-       a. 在 `price_data` 中按优先级（priority）查找匹配的关键词（keywords）、尺寸和材质，以确定基础价格。
-       b. 使用正则表达式解析订单项中的数量（例如订单编号 "B-5634"）。
-       c. 调用单项计算函数计算: 义乳/义臀成本、枕芯成本、硅胶/电动成本
-       d. 计算该订单项的成本（基础价格 * 数量）和代发成本（附加费用）。
-    3. 将所有订单项的价格累加，返回各类成本。
+    if pd.isna(text) or not str(text).strip():
+        return MatchResult(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            matched_any=False,
+            failure_reasons=["卖家备注为空"],
+        )
 
-    参数:
-        text (str): 要匹配的文本。
-        price_data (list): 从JSON加载的价格数据，每项包含 keywords、priority、products 等字段。
-        moving_costs_data (list): 义乳/义臀成本数据
-        pillow_cost_data (dict): 枕芯成本数据
-        others_cost_data (list): 硅胶/电动成本数据
+    moving_costs_data = moving_costs_data or []
+    pillow_cost_data = pillow_cost_data or {}
+    others_cost_data = others_cost_data or []
+    effective_dropship_keywords = tuple(
+        dropship_keywords or DEFAULT_DROPSHIP_KEYWORDS
+    )
 
-    返回:
-        tuple: (成本, 代发成本, 总成本, 义乳/义臀成本, 枕芯成本, 硅胶/电动成本)
-               如果未找到任何匹配项，则返回 (None, None, None, 0, 0, 0)
-               如果义乳/义臀或枕芯有匹配错误，对应项返回 None
-    """
-    if pd.isna(text) or not text:
-        return None, None, None, None, None, None
+    original_text = str(text)
+    compact_text = re.sub(r"\s+", "", original_text)
+    item_texts = compact_text.split("。")
+    raw_items = original_text.split("。")
 
-    # 去除文本中所有空格
-    text = re.sub(
-        r"\s+", "", str(text)
-    )  # 去除所有空白字符（包括半角空格、全角空格、制表符等）
+    total_base_cost = 0.0
+    total_dropship_cost = 0.0
+    total_moving_cost = 0.0
+    total_pillow_cost = 0.0
+    total_others_cost = 0.0
 
-    # 去除半角和全角空格，并使用'。'分割项目
-    items = str(text).replace(" ", "").replace("\u3000", "").split("。")
-    total_base_cost = 0  # 成本（基础价格）
-    total_dropship_cost = 0  # 代发成本（附加费用）
-    total_moving_cost = 0.0  # 义乳/义臀成本
-    total_pillow_cost = 0.0  # 枕芯成本
-    total_others_cost = 0.0  # 硅胶/电动成本
-
-    # 用于标记是否有匹配错误
     moving_has_error = False
     pillow_has_error = False
+    fatal_base_error = False
+    matched_any = False
+    failure_reasons: List[str] = []
 
-    for item_text in items:
+    sorted_categories = sorted(price_data, key=lambda x: x.get("priority", 999))
+
+    for item_index, item_text in enumerate(item_texts, start=1):
         if not item_text.strip():
             continue
 
-        # 转换为小写以便忽略大小写匹配
+        reasons_before_item = len(failure_reasons)
+        raw_item = raw_items[item_index - 1] if item_index - 1 < len(raw_items) else item_text
+        fragment = _reason_fragment(raw_item)
         item_text_lower = item_text.lower()
-        item_price = 0
-        base_price_found = False
-
-        # 检查数量：统计半角逗号和全角逗号的数量
         quantity = item_text.count(",") + item_text.count("，")
 
-        # 查找基础价格 - 按优先级排序后匹配
-        sorted_categories = sorted(price_data, key=lambda x: x.get("priority", 999))
+        item_price = 0.0
+        base_price_found = False
+        keyword_seen = False
+        keyword_size_seen = False
 
         for category_data in sorted_categories:
             keywords = category_data.get("keywords", [])
-            products = category_data["products"]
+            products = category_data.get("products", [])
 
-            # 检查是否有任何关键词匹配（从左向右找第一个匹配的）
-            matched_keyword, keyword_pos = find_leftmost_match(
+            matched_keyword, _keyword_pos = find_leftmost_match(
                 item_text_lower, keywords
             )
             if matched_keyword is None:
                 continue
+            keyword_seen = True
 
-            # 从左向右找第一个匹配的尺寸
-            # 为每个产品准备尺寸候选项（包含多种格式）
             size_candidates = []
             for product in products:
-                size = product["尺寸"]
-                # 准备三种尺寸格式
-                size_formats = [
-                    size,  # 50*150
-                    size.replace("*", "x"),  # 50x150
-                    size.replace("*", ""),  # 50150
-                ]
-                # 将产品和尺寸格式组合为元组
-                for size_format in size_formats:
+                size = str(product.get("尺寸", ""))
+                for size_format in _base_size_formats(size):
                     size_candidates.append((size_format, product))
 
-            matched_size, size_pos = find_leftmost_match(
+            matched_size, _size_pos = find_leftmost_match(
                 item_text_lower, size_candidates
             )
             if matched_size is None:
                 continue
-
-            # 获取匹配的产品
+            keyword_size_seen = True
             matched_product = matched_size[1]
 
-            # 材质匹配: 按材质名称长度从长到短排序,优先匹配更长的材质名
             material_candidates = [
-                (material, price) for material, price in matched_product["价格"].items()
+                (material, price)
+                for material, price in matched_product.get("价格", {}).items()
             ]
             material_candidates.sort(key=lambda x: len(x[0]), reverse=True)
-            matched_material, material_pos = find_longest_match_at_leftmost(
+            matched_material, _material_pos = find_longest_match_at_leftmost(
                 item_text_lower, material_candidates
             )
-
             if matched_material:
-                item_price = matched_material[1]
+                item_price = float(matched_material[1])
                 base_price_found = True
                 break
 
-        # 处理数量为0的情况
-        if quantity == 0:
-            if base_price_found:
-                # 如果匹配到价格，按数量1计算
+        if base_price_found:
+            if quantity == 0:
                 quantity = 1
-            # 如果没有匹配到价格，quantity保持为0，只统计额外费用
+            total_base_cost += item_price * quantity
+            matched_any = True
+        else:
+            base_failure = _diagnose_base_failure(
+                item_text_lower,
+                quantity,
+                keyword_seen,
+                keyword_size_seen,
+                price_data,
+            )
+            if base_failure:
+                failure_reasons.append(
+                    f"第{item_index}段基础成本：{base_failure}（片段：{fragment}）"
+                )
+            if quantity > 0:
+                fatal_base_error = True
 
-        # 如果没有匹配到价格且数量>0，则返回空
-        if not base_price_found and quantity > 0:
-            return None, None, None, None, None, None
+        extra_count = sum(
+            item_text_lower.count(str(keyword).lower())
+            for keyword in effective_dropship_keywords
+            if str(keyword)
+        )
+        extra_cost = extra_count * float(dropship_unit_cost)
+        total_dropship_cost += extra_cost
+        if extra_count > 0:
+            matched_any = True
 
-        # 计算成本（基础价格 * 数量）
-        base_cost = item_price * quantity
-        total_base_cost += base_cost
-
-        # 检查额外费用（代发成本），对关键词进行计数
-        extra_cost = 0
-
-        # 统计"枕芯"出现的次数
-        pillow_count = item_text_lower.count("枕芯")
-        extra_cost += pillow_count * 5.5
-
-        # 统计"yr"或"义乳"出现的次数
-        yr_count = item_text_lower.count("yr") + item_text_lower.count("义乳")
-        extra_cost += yr_count * 5.5
-
-        # 统计"yt"或"义臀"出现的次数
-        yt_count = item_text_lower.count("yt") + item_text_lower.count("义臀")
-        extra_cost += yt_count * 5.5
-
-        # 代发成本 = 附加费用（不乘以数量）
-        dropship_cost = extra_cost
-        total_dropship_cost += dropship_cost
-
-        # 在遍历每个订单项时,调用单项计算函数
-        # 计算义乳/义臀成本
-        if moving_costs_data and not moving_has_error:
+        moving_triggered = bool(re.search(r"yr|yt", item_text_lower))
+        if moving_costs_data:
             item_moving_cost = calculate_moving_cost_for_item(
-                item_text.strip(), moving_costs_data
+                item_text, moving_costs_data
             )
             if item_moving_cost is None:
                 moving_has_error = True
+                failure_reasons.append(
+                    f"第{item_index}段义乳/义臀成本：未匹配完整规格"
+                    f"（片段：{fragment}）"
+                )
             else:
                 total_moving_cost += item_moving_cost
+        if moving_triggered:
+            matched_any = True
 
-        # 计算枕芯成本
-        if pillow_cost_data and not pillow_has_error:
+        pillow_triggered = "枕芯" in item_text_lower
+        if pillow_cost_data:
             item_pillow_cost = calculate_pillow_cost_for_item(
-                item_text.strip(), pillow_cost_data
+                item_text, pillow_cost_data
             )
             if item_pillow_cost is None:
                 pillow_has_error = True
+                failure_reasons.append(
+                    f"第{item_index}段枕芯成本：缺少或不支持“类型关键词+尺寸”"
+                    f"（片段：{fragment}）"
+                )
             else:
                 total_pillow_cost += item_pillow_cost
+        if pillow_triggered:
+            matched_any = True
 
-        # 计算硅胶/电动成本
+        other_triggered = any(
+            str(item.get("remark", "")).lower() in item_text_lower
+            for item in others_cost_data
+            if str(item.get("remark", ""))
+        )
         if others_cost_data:
-            item_others_cost = calculate_others_cost_for_item(
-                item_text.strip(), others_cost_data
+            total_others_cost += calculate_others_cost_for_item(
+                item_text, others_cost_data
             )
-            total_others_cost += item_others_cost
+        if other_triggered:
+            matched_any = True
 
-        # 如果数量为0，没有匹配到价格，且没有额外费用，返回空
+        # 保留旧规则：「。」分隔的任一独立分段若无法计费，
+        # 则整行成本返回空。普通说明文字与有效商品位于同一
+        # 分段时，仍不会影响已匹配项目。
         if (
             quantity == 0
             and not base_price_found
             and extra_cost == 0
             and total_others_cost == 0
         ):
-            return None, None, None, None, None, None
+            fatal_base_error = True
+            if len(failure_reasons) == reasons_before_item:
+                failure_reasons.append(
+                    f"第{item_index}段：未识别任何可计费项目"
+                    f"（片段：{fragment}）"
+                )
 
-    total_cost = total_base_cost + total_dropship_cost
+    if not matched_any and not failure_reasons:
+        failure_reasons.append(
+            f"第1段：未识别任何可计费项目（片段：{_reason_fragment(original_text)}）"
+        )
 
-    # 如果有匹配错误,返回None
+    if fatal_base_error or not matched_any:
+        return MatchResult(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            matched_any=matched_any,
+            failure_reasons=failure_reasons,
+        )
+
     final_moving_cost = None if moving_has_error else total_moving_cost
     final_pillow_cost = None if pillow_has_error else total_pillow_cost
+    total_cost = total_base_cost + total_dropship_cost
 
-    return (
+    return MatchResult(
         total_base_cost,
         total_dropship_cost,
         total_cost,
         final_moving_cost,
         final_pillow_cost,
         total_others_cost,
+        matched_any=matched_any,
+        failure_reasons=failure_reasons,
     )
 
+
+def match_price(
+    text,
+    price_data,
+    moving_costs_data=None,
+    pillow_cost_data=None,
+    others_cost_data=None,
+    dropship_unit_cost: float = 5.5,
+    dropship_keywords: Optional[Sequence[str]] = None,
+):
+    """
+    兼容旧调用的成本匹配接口。
+
+    返回:
+        tuple: (成本, 代发成本, 总成本, 义乳/义臀成本, 枕芯成本, 硅胶/电动成本)
+    """
+
+    return match_price_detailed(
+        text,
+        price_data,
+        moving_costs_data,
+        pillow_cost_data,
+        others_cost_data,
+        dropship_unit_cost=dropship_unit_cost,
+        dropship_keywords=dropship_keywords,
+    ).as_tuple()
 
 def calculate_moving_cost_for_item(item_text, moving_costs_data):
     """
@@ -586,7 +598,7 @@ def calculate_moving_cost_for_item(item_text, moving_costs_data):
 
     规则：
     - 如果订单项不包含yr或yt关键词，返回0
-    - 如果包含yr或yt，必须每个yr/yt都能在moving_and_selling_costs.json中匹配到完整remark
+    - 如果包含yr或yt，必须每个yr/yt都能在「义乳义臀价格」工作表中匹配到完整关键词
     - 搜索范围: 上一个yr/yt位置的末尾后(如有)到下一个yr/yt位置的开头前(如有)
     - 如果任何一个yr/yt匹配不到，返回None（表示备注错误）
 
@@ -781,7 +793,7 @@ def calculate_others_cost_for_item(item_text, others_cost_data):
     为单个订单项计算硅胶/电动成本
 
     规则：
-    - 匹配others.json中的remark关键词
+    - 匹配「其他成本」工作表中的关键词
     - 按最长匹配原则
 
     参数:
@@ -938,6 +950,7 @@ def process_cost_detail_sheet(
     moving_costs,
     pillow_costs,
     others_costs,
+    match_reasons,
     shop_names,
     shop_name_col_idx,
 ):
@@ -951,6 +964,7 @@ def process_cost_detail_sheet(
         moving_costs: 义乳/义臀成本列表
         pillow_costs: 枕芯成本列表
         others_costs: 硅胶/电动成本列表
+        match_reasons: 无法匹配原因说明列表
         shop_names: 店铺名称列表
         shop_name_col_idx: 店铺名称列索引
 
@@ -1013,6 +1027,15 @@ def process_cost_detail_sheet(
         others_col_idx = sheet.max_column + 1
         sheet.cell(row=1, column=others_col_idx, value="硅胶/电动成本")
 
+    # 原因列放在成本列组最后，已存在时直接复用。
+    reason_header = "无法匹配原因说明"
+    if reason_header in header:
+        reason_col_idx = header.index(reason_header) + 1
+    else:
+        reason_col_idx = sheet.max_column + 1
+        sheet.cell(row=1, column=reason_col_idx, value=reason_header)
+    sheet.column_dimensions[get_column_letter(reason_col_idx)].width = 50
+
     # 写入数据（列顺序：成本、代发成本、总成本(成本+代发)、空列、义乳/义臀成本、枕芯成本、硅胶/电动成本）
     for i, (
         shop_name,
@@ -1021,6 +1044,7 @@ def process_cost_detail_sheet(
         moving_cost,
         pillow_cost,
         others_cost,
+        match_reason,
     ) in enumerate(
         zip(
             shop_names,
@@ -1029,6 +1053,7 @@ def process_cost_detail_sheet(
             moving_costs,
             pillow_costs,
             others_costs,
+            match_reasons,
         )
     ):
         row_index = i + 2
@@ -1052,6 +1077,11 @@ def process_cost_detail_sheet(
         sheet.cell(row=row_index, column=pillow_col_idx, value=pillow_cost)
         # 硅胶/电动成本
         sheet.cell(row=row_index, column=others_col_idx, value=others_cost)
+        # 无法匹配原因说明
+        reason_cell = sheet.cell(
+            row=row_index, column=reason_col_idx, value=match_reason or ""
+        )
+        reason_cell.alignment = Alignment(vertical="top", wrap_text=True)
 
     # 在明细数据底部添加合计行
     data_start_row = 2
@@ -1093,6 +1123,7 @@ def process_cost_detail_sheet(
         column=others_col_idx,
         value=f"=SUM({get_column_letter(others_col_idx)}{data_start_row}:{get_column_letter(others_col_idx)}{data_end_row})",
     )
+    sheet.cell(row=summary_row, column=reason_col_idx, value="")
 
     return (
         cost_col_idx,
@@ -1107,10 +1138,11 @@ def process_cost_detail_sheet(
 def process_excel_file(
     file_path,
     price_data,
-    shop_data,
     moving_costs_data,
     pillow_cost_data,
     others_cost_data,
+    dropship_unit_cost=5.5,
+    dropship_keywords=None,
     output_dir=None,
     overwrite=False,
 ):
@@ -1150,6 +1182,7 @@ def process_excel_file(
         pillow_costs = []  # 枕芯成本
         others_costs = []  # 硅胶/电动成本
         grand_total_costs = []  # 总成本
+        match_reasons = []  # 无法匹配原因说明
         shop_names = []  # 店铺名称（直接使用"商家/店铺"列去空白）
         overseas_count = 0  # 海外订单计数
         unmatched_records = []  # 未匹配记录明细
@@ -1169,41 +1202,33 @@ def process_excel_file(
                 pillow_costs.append("")
                 others_costs.append("")
                 grand_total_costs.append("")
+                match_reasons.append("发海外，成本需人工核对填写")
                 shop_names.append("")
                 overseas_count += 1
             else:
-                # 成本匹配：仅从卖家备注中匹配,同时计算所有成本类型
-                base_cost, dropship_cost, _, moving_cost, pillow_cost, others_cost = (
-                    match_price(
-                        seller_note,
-                        price_data,
-                        moving_costs_data,
-                        pillow_cost_data,
-                        others_cost_data,
-                    )
+                # 成本匹配：仅从卖家备注中匹配，同时生成字段级诊断。
+                match_result = match_price_detailed(
+                    seller_note,
+                    price_data,
+                    moving_costs_data,
+                    pillow_cost_data,
+                    others_cost_data,
+                    dropship_unit_cost=dropship_unit_cost,
+                    dropship_keywords=dropship_keywords,
                 )
+                (
+                    base_cost,
+                    dropship_cost,
+                    _,
+                    moving_cost,
+                    pillow_cost,
+                    others_cost,
+                ) = match_result.as_tuple()
 
-                all_cost_unmatched = all(
-                    value is None
-                    for value in (
-                        base_cost,
-                        dropship_cost,
-                        moving_cost,
-                        pillow_cost,
-                        others_cost,
-                    )
-                )
+                mismatch_reason = "；".join(match_result.failure_reasons)
+                match_reasons.append(mismatch_reason)
 
-                mismatch_reasons = []
-                if all_cost_unmatched:
-                    mismatch_reasons.append("基础成本未匹配")
-                else:
-                    if moving_cost is None:
-                        mismatch_reasons.append("义乳/义臀成本匹配失败")
-                    if pillow_cost is None:
-                        mismatch_reasons.append("枕芯成本匹配失败")
-
-                if mismatch_reasons:
+                if mismatch_reason:
                     order_id = extract_order_id(row, seller_note)
                     normalized_note = re.sub(r"\s+", " ", seller_note).strip()
                     if len(normalized_note) > 80:
@@ -1212,7 +1237,7 @@ def process_excel_file(
                         {
                             "row_number": row_number,
                             "order_id": order_id,
-                            "reason": "；".join(mismatch_reasons),
+                            "reason": mismatch_reason,
                             "seller_note": normalized_note,
                         }
                     )
@@ -1306,6 +1331,7 @@ def process_excel_file(
                 moving_costs,
                 pillow_costs,
                 others_costs,
+                match_reasons,
                 shop_names,
                 shop_name_col_idx,
             )
@@ -1360,13 +1386,14 @@ def process_excel_file(
             df["义乳/义臀成本"] = moving_costs
             df["枕芯成本"] = pillow_costs
             df["硅胶/电动成本"] = others_costs
+            df["无法匹配原因说明"] = match_reasons
             df.to_excel(output_file_path, index=False, engine="openpyxl")
             print(f"已保存处理后的文件: {output_file_path}")
 
         # 统计匹配情况
-        matched_count = sum(1 for cost in base_costs if cost != "")
         total_count = len(base_costs)
         unmatched_count = len(unmatched_records)
+        matched_count = total_count - overseas_count - unmatched_count
         print(f"匹配成功: {matched_count}/{total_count} 条记录")
         if overseas_count > 0:
             print(f"海外订单: {overseas_count} 条（已置空，需手动补全）")
@@ -1410,211 +1437,6 @@ def process_excel_file(
         )
 
 
-def process_single_file(
-    file_path,
-    json_path,
-    shop_json_path,
-    moving_costs_json_path,
-    pillow_cost_json_path,
-    others_json_path,
-):
-    """处理单个Excel文件"""
-    # 加载价格数据
-    print("加载价格数据...")
-    price_data = load_price_data(json_path)
-    print(f"已加载 {len(price_data)} 个类别的价格数据")
-
-    # 加载店铺数据
-    shop_data = load_shop_data(shop_json_path)
-    if shop_data:
-        print(f"已加载 {len(shop_data)} 个店铺数据")
-
-    # 加载动销成本数据
-    moving_costs_data = load_moving_costs(moving_costs_json_path)
-    if moving_costs_data:
-        print(f"已加载 {len(moving_costs_data)} 条动销成本数据")
-
-    # 加载枕芯成本数据
-    pillow_cost_data = load_pillow_cost(pillow_cost_json_path)
-    if pillow_cost_data:
-        print(f"已加载 {len(pillow_cost_data)} 种尺寸的枕芯成本数据")
-
-    # 加载硅胶/电动成本数据
-    others_cost_data = load_others_cost(others_json_path)
-    if others_cost_data:
-        print(f"已加载 {len(others_cost_data)} 条硅胶/电动成本数据")
-
-    # 处理文件
-    result = process_excel_file(
-        file_path,
-        price_data,
-        shop_data,
-        moving_costs_data,
-        pillow_cost_data,
-        others_cost_data,
-    )
-    if result.success:
-        print(f"\n处理完成！")
-        return True
-    else:
-        print(f"\n处理失败！原因: {result.message}")
-        return False
-
-
-def _make_input_func(base_path: str) -> Tuple[Callable[[str], str], bool]:
-    """创建输入函数。
-
-    优先使用 prompt_toolkit 以支持：
-    - Tab 自动补全路径
-    - 输入历史记录
-
-    如果 prompt_toolkit 不可用，则回退到内置 input()。
-
-    参数:
-        base_path (str): 程序运行目录（脚本目录或 exe 所在目录）
-
-    返回:
-        tuple: (input_func, tab_enabled)
-    """
-
-    try:
-        # 使用动态导入，避免在未安装依赖时触发编辑器的“无法解析导入”提示。
-        import importlib
-
-        prompt_toolkit = importlib.import_module("prompt_toolkit")
-        completion_mod = importlib.import_module("prompt_toolkit.completion")
-        history_mod = importlib.import_module("prompt_toolkit.history")
-
-        PromptSession = getattr(prompt_toolkit, "PromptSession")
-        PathCompleter = getattr(completion_mod, "PathCompleter")
-        FileHistory = getattr(history_mod, "FileHistory")
-
-        history_file = os.path.join(base_path, ".cost_calculator_history")
-        session = PromptSession(
-            completer=PathCompleter(expanduser=True),
-            history=FileHistory(history_file),
-        )
-
-        def _prompt_toolkit_input(prompt_text: str) -> str:
-            return session.prompt(prompt_text)
-
-        return _prompt_toolkit_input, True
-    except Exception:
-        # 任何导入/初始化失败都直接回退，避免影响主流程
-        return input, False
-
-
-def _print_help() -> None:
-    """打印交互模式帮助。"""
-
-    print(
-        """
-可用命令：
-  help / ?           显示帮助
-  exit / quit / q    退出程序
-  cd <目录>          切换当前目录（影响相对路径与 ls）
-  ls [目录]          列出目录下的 Excel 文件（.xlsx/.xls）
-    outdir             查看当前输出目录策略
-    outdir <目录>      设置输出目录（所有结果统一输出到该目录）
-    outdir reset       重置为“输出到源文件同目录”
-    overwrite on/off   设置同名文件覆盖策略
-
-输入方式：
-  - 直接输入 Excel 文件路径（支持拖拽进来）
-  - 可一次输入多个路径（用空格分隔；带空格的路径请用引号包住）
-  - 输入目录时，会自动处理该目录下的所有 .xlsx/.xls（不递归）
-  - 支持通配符：例如 *.xlsx
-""".strip()
-    )
-
-
-def _normalize_user_path(raw_path: str, cwd: str) -> str:
-    """规范化用户输入路径。
-
-    - 去掉首尾引号
-    - 展开环境变量与 ~
-    - 相对路径基于 cwd
-    """
-
-    cleaned = raw_path.strip().strip("\"").strip("'")
-    cleaned = os.path.expandvars(os.path.expanduser(cleaned))
-    if not cleaned:
-        return ""
-    if os.path.isabs(cleaned):
-        return os.path.normpath(cleaned)
-    return os.path.normpath(os.path.join(cwd, cleaned))
-
-
-def _expand_cli_tokens(tokens: Sequence[str], cwd: str) -> List[str]:
-    """将 token 扩展为实际路径列表。
-
-    支持：
-    - 通配符（glob）
-    - 相对路径
-    """
-
-    results: List[str] = []
-    for token in tokens:
-        token = token.strip()
-        if not token:
-            continue
-
-        # 先规范化，再尝试 glob。
-        norm = _normalize_user_path(token, cwd)
-        if not norm:
-            continue
-
-        # glob 需要保留通配符：如果用户输入包含 * ? [，就按 glob 展开。
-        if any(ch in token for ch in ("*", "?", "[")):
-            matches = glob.glob(norm)
-            if matches:
-                results.extend([os.path.normpath(p) for p in matches])
-            else:
-                results.append(norm)
-        else:
-            results.append(norm)
-
-    # 去重但保序
-    seen = set()
-    deduped: List[str] = []
-    for p in results:
-        if p not in seen:
-            deduped.append(p)
-            seen.add(p)
-    return deduped
-
-
-def _list_excel_files(dir_path: str) -> List[str]:
-    """列出目录下的 Excel 文件（不递归）。"""
-
-    try:
-        p = Path(dir_path)
-        if not p.exists() or not p.is_dir():
-            return []
-        files = []
-        for ext in ("*.xlsx", "*.xls"):
-            files.extend([str(x) for x in p.glob(ext)])
-        files.sort(key=lambda x: x.lower())
-        return files
-    except Exception:
-        return []
-
-
-def _parse_user_input_to_paths(user_input: str, cwd: str) -> List[str]:
-    """把一行用户输入解析成路径列表。
-
-    说明：
-    - 使用 shlex.split 兼容带引号路径
-    - 若解析失败，则把整行当作一个路径
-    """
-
-    try:
-        tokens = shlex.split(user_input, posix=False)
-    except Exception:
-        tokens = [user_input]
-    return _expand_cli_tokens(tokens, cwd)
-
-
 def main():
     """主函数（默认启动 Textual 界面）。"""
 
@@ -1626,125 +1448,6 @@ def main():
         return
 
     textual_main()
-
-
-def _handle_one_target(
-    target: str,
-    price_data,
-    shop_data,
-    moving_costs_data,
-    pillow_cost_data,
-    others_cost_data,
-    output_options: Dict[str, object],
-    write_log: Callable[[str], None],
-) -> List[ProcessResult]:
-    """处理一个目标（文件 or 目录）。"""
-
-    results: List[ProcessResult] = []
-
-    if not target:
-        return results
-
-    if not os.path.exists(target):
-        msg = f"路径不存在: {target}"
-        print(f"错误: {msg}")
-        results.append(
-            ProcessResult(
-                input_path=target,
-                success=False,
-                status="failed",
-                message=msg,
-            )
-        )
-        return results
-
-    if os.path.isdir(target):
-        excel_files = _list_excel_files(target)
-        if not excel_files:
-            msg = "目录下未找到 Excel 文件"
-            print(f"{msg}: {target}")
-            results.append(
-                ProcessResult(
-                    input_path=target,
-                    success=False,
-                    status="skipped",
-                    message=msg,
-                )
-            )
-            return results
-        print(f"\n将处理目录: {target}（共 {len(excel_files)} 个文件）")
-        write_log(f"目录批处理: {target} | 文件数: {len(excel_files)}")
-        for f in excel_files:
-            results.extend(
-                _handle_one_target(
-                    f,
-                    price_data,
-                    shop_data,
-                    moving_costs_data,
-                    pillow_cost_data,
-                    others_cost_data,
-                    output_options,
-                    write_log,
-                )
-            )
-        return results
-
-    # 文件处理
-    if not os.path.isfile(target):
-        msg = "不是文件"
-        print(f"错误: {msg} {target}")
-        results.append(
-            ProcessResult(
-                input_path=target,
-                success=False,
-                status="failed",
-                message=msg,
-            )
-        )
-        return results
-
-    if not (target.lower().endswith(".xlsx") or target.lower().endswith(".xls")):
-        msg = "非 Excel 文件"
-        print(f"跳过: {msg} {target}")
-        results.append(
-            ProcessResult(
-                input_path=target,
-                success=False,
-                status="skipped",
-                message=msg,
-            )
-        )
-        return results
-
-    print(f"\n将处理文件: {target}")
-    write_log(f"开始处理: {target}")
-
-    output_dir = output_options.get("output_dir")
-    overwrite = bool(output_options.get("overwrite"))
-
-    result = process_excel_file(
-        target,
-        price_data,
-        shop_data,
-        moving_costs_data,
-        pillow_cost_data,
-        others_cost_data,
-        output_dir=output_dir,
-        overwrite=overwrite,
-    )
-
-    if result.success:
-        print("处理完成。")
-        write_log(
-            f"处理成功: {target} -> {result.output_path} | 匹配 {result.matched_count}/{result.total_count}"
-        )
-    else:
-        print(f"处理失败。原因: {result.message}")
-        write_log(f"处理失败: {target} | 原因: {result.message}")
-
-    results.append(result)
-    return results
-
 
 if __name__ == "__main__":
     main()

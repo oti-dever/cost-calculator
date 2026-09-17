@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import List, Literal
 
@@ -23,6 +25,7 @@ from textual.widgets import (
 )
 
 from calculator_service import CostCalculatorService
+from config_workbook import ensure_editable_config
 from cost_calculator import ProcessResult
 
 
@@ -115,6 +118,19 @@ def _show_system_target_dialog(
     if not selected_path:
         return None
     return os.path.normpath(str(selected_path))
+
+
+def _open_with_default_app(path: str | Path) -> None:
+    """使用操作系统默认应用打开文件。"""
+
+    resolved = str(Path(path).resolve())
+    if hasattr(os, "startfile"):
+        os.startfile(resolved)  # type: ignore[attr-defined]
+        return
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", resolved])
+        return
+    subprocess.Popen(["xdg-open", resolved])
 
 
 class LogDetailScreen(ModalScreen[None]):
@@ -338,6 +354,7 @@ class CostCalculatorTextualApp(App[None]):
 
                 with Horizontal(id="actions"):
                     yield Button("开始处理", id="run-btn", variant="success")
+                    yield Button("打开配置", id="open-config-btn", variant="primary")
                     yield Button("清空日志", id="clear-log-btn", variant="primary")
                     yield Button("查看日志详情", id="show-log-detail-btn")
 
@@ -376,6 +393,18 @@ class CostCalculatorTextualApp(App[None]):
         self.log_lines = []
         detail = self.query_one("#result-detail", Static)
         detail.update("结果详情：请选择一条结果记录")
+
+    @on(Button.Pressed, "#open-config-btn")
+    def open_config(self) -> None:
+        """创建（如有需要）并打开可编辑成本配置。"""
+
+        try:
+            config_path = ensure_editable_config()
+            _open_with_default_app(config_path)
+            self._write_log(f"已打开成本配置：{config_path}")
+            self._write_log("修改后请保存并关闭 Excel，再开始处理。")
+        except Exception as exc:
+            self._write_log(f"打开成本配置失败：{exc}")
 
     @on(Button.Pressed, "#show-log-detail-btn")
     def show_log_detail(self) -> None:
@@ -531,6 +560,7 @@ class CostCalculatorTextualApp(App[None]):
         self.processing = True
         run_btn = self.query_one("#run-btn", Button)
         run_btn.disabled = True
+        self.query_one("#open-config-btn", Button).disabled = True
 
         self._write_log(f"开始处理，共 {len(targets)} 个输入目标...")
         self.run_processing(targets, output_dir, overwrite)
@@ -564,6 +594,7 @@ class CostCalculatorTextualApp(App[None]):
         self.processing = False
         run_btn = self.query_one("#run-btn", Button)
         run_btn.disabled = False
+        self.query_one("#open-config-btn", Button).disabled = False
 
     def _write_log_from_worker(self, message: str) -> None:
         """后台线程写日志。"""

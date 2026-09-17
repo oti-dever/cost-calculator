@@ -220,3 +220,6 @@ test_excel/
 
 # history
 .cost_calculator_history
+
+# 运行时由模板复制、供使用者编辑的成本配置
+成本配置.xlsx
