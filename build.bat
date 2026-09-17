@@ -1,6 +1,14 @@
 @echo off
 chcp 65001 >nul
-setlocal EnableDelayedExpansion
+setlocal EnableExtensions EnableDelayedExpansion
+
+REM 始终从脚本所在目录构建，避免由启动方式改变当前工作目录
+cd /d "%~dp0"
+if errorlevel 1 (
+    echo [错误] 无法进入项目目录: %~dp0
+    pause
+    exit /b 1
+)
 
 echo ========================================
 echo   成本计算器构建脚本
@@ -75,6 +83,18 @@ if %errorlevel% neq 0 (
 ) else (
     echo [完成] 所有依赖包已安装
 )
+
+REM 检查系统文件/文件夹选择窗口所需的 Tk 组件
+echo.
+echo [检查] 检查系统选择窗口组件...
+"!PY_CMD!" -c "import tkinter" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [错误] 当前 Python 未包含 tkinter/Tk 组件，无法打开系统文件或文件夹选择窗口
+    echo [提示] 请安装包含 Tcl/Tk 的完整 Python 发行版后重试
+    pause
+    exit /b 1
+)
+echo [完成] 系统选择窗口组件可用
 
 REM 固定 rich 版本，避免 PyInstaller + rich 14.x 在 onefile 下的 Unicode 子模块导入问题
 "!PY_CMD!" -m pip install --disable-pip-version-check --quiet rich==13.9.4
@@ -155,7 +175,7 @@ echo   - 使用Excel公式实现动态更新
 echo.
 echo 使用方法:
 echo   1. 将 Excel 文件拖放到 CostCalculator.exe 上
-echo   2. Start exe then input file path in UI
+echo   2. Start exe, then input a path or use the system file/folder picker
 echo   3. 处理完成后在结果表和日志区查看结果
 echo.
 echo 输入要求:
