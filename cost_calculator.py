@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 import pandas as pd
 
@@ -110,6 +110,10 @@ class MatchResult:
 
 
 ORDER_ID_COLUMN = "订单编号"
+UNMATCHED_ROW_FILL = PatternFill(
+    fill_type="solid",
+    fgColor="FFFFC7CE",
+)
 
 
 def _format_cell_text(value) -> str:
@@ -953,6 +957,7 @@ def process_cost_detail_sheet(
     match_reasons,
     shop_names,
     shop_name_col_idx,
+    unmatched_flags=None,
 ):
     """
     处理成本明细sheet,添加成本相关列和合计行
@@ -967,6 +972,7 @@ def process_cost_detail_sheet(
         match_reasons: 无法匹配原因说明列表
         shop_names: 店铺名称列表
         shop_name_col_idx: 店铺名称列索引
+        unmatched_flags: 是否无法匹配的标记列表；省略时根据原因说明判断
 
     返回:
         tuple: (cost_col_idx, dropship_col_idx, grand_total_col_idx, moving_col_idx, pillow_col_idx, others_col_idx)
@@ -1083,6 +1089,15 @@ def process_cost_detail_sheet(
         )
         reason_cell.alignment = Alignment(vertical="top", wrap_text=True)
 
+        is_unmatched = (
+            bool(unmatched_flags[i])
+            if unmatched_flags is not None
+            else bool(match_reason)
+        )
+        if is_unmatched:
+            for column_index in range(1, sheet.max_column + 1):
+                sheet.cell(row=row_index, column=column_index).fill = UNMATCHED_ROW_FILL
+
     # 在明细数据底部添加合计行
     data_start_row = 2
     data_end_row = len(base_costs) + 1
@@ -1183,6 +1198,7 @@ def process_excel_file(
         others_costs = []  # 硅胶/电动成本
         grand_total_costs = []  # 总成本
         match_reasons = []  # 无法匹配原因说明
+        unmatched_flags = []  # 是否属于无法匹配记录
         shop_names = []  # 店铺名称（直接使用"商家/店铺"列去空白）
         overseas_count = 0  # 海外订单计数
         unmatched_records = []  # 未匹配记录明细
@@ -1203,6 +1219,7 @@ def process_excel_file(
                 others_costs.append("")
                 grand_total_costs.append("")
                 match_reasons.append("发海外，成本需人工核对填写")
+                unmatched_flags.append(False)
                 shop_names.append("")
                 overseas_count += 1
             else:
@@ -1227,6 +1244,7 @@ def process_excel_file(
 
                 mismatch_reason = "；".join(match_result.failure_reasons)
                 match_reasons.append(mismatch_reason)
+                unmatched_flags.append(bool(mismatch_reason))
 
                 if mismatch_reason:
                     order_id = extract_order_id(row, seller_note)
@@ -1334,6 +1352,7 @@ def process_excel_file(
                 match_reasons,
                 shop_names,
                 shop_name_col_idx,
+                unmatched_flags,
             )
 
             if column_indices is None:
@@ -1388,6 +1407,16 @@ def process_excel_file(
             df["硅胶/电动成本"] = others_costs
             df["无法匹配原因说明"] = match_reasons
             df.to_excel(output_file_path, index=False, engine="openpyxl")
+            workbook = load_workbook(output_file_path)
+            sheet = workbook.active
+            for row_index, is_unmatched in enumerate(unmatched_flags, start=2):
+                if is_unmatched:
+                    for column_index in range(1, sheet.max_column + 1):
+                        sheet.cell(
+                            row=row_index, column=column_index
+                        ).fill = UNMATCHED_ROW_FILL
+            workbook.save(output_file_path)
+            workbook.close()
             print(f"已保存处理后的文件: {output_file_path}")
 
         # 统计匹配情况

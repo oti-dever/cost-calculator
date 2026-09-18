@@ -7,7 +7,11 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 from config_workbook import load_config_workbook
-from cost_calculator import process_cost_detail_sheet, process_excel_file
+from cost_calculator import (
+    UNMATCHED_ROW_FILL,
+    process_cost_detail_sheet,
+    process_excel_file,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +81,25 @@ class ExcelOutputTests(unittest.TestCase):
             self.assertIsNone(reasons[5])
             self.assertIn("未识别任何可计费项目", reasons[6])
 
+            unmatched_rows = (3, 4, 6, 8)
+            for row_index in unmatched_rows:
+                self.assertTrue(
+                    all(
+                        detail.cell(row_index, column_index).fill
+                        == UNMATCHED_ROW_FILL
+                        for column_index in range(1, detail.max_column + 1)
+                    )
+                )
+
+            for row_index in (2, 5, 7):
+                self.assertTrue(
+                    all(
+                        detail.cell(row_index, column_index).fill
+                        != UNMATCHED_ROW_FILL
+                        for column_index in range(1, detail.max_column + 1)
+                    )
+                )
+
             summary_row = len(rows) + 2
             self.assertIsNone(detail.cell(summary_row, reason_index).value)
             self.assertNotIn("无法匹配原因说明", [cell.value for cell in output["店铺统计"][1]])
@@ -122,6 +145,12 @@ class ExcelOutputTests(unittest.TestCase):
         self.assertEqual(1, headers.count("无法匹配原因说明"))
         reason_column = headers.index("无法匹配原因说明") + 1
         self.assertEqual("新原因", worksheet.cell(2, reason_column).value)
+        self.assertTrue(
+            all(
+                worksheet.cell(2, column_index).fill == UNMATCHED_ROW_FILL
+                for column_index in range(1, worksheet.max_column + 1)
+            )
+        )
         workbook.close()
 
 
