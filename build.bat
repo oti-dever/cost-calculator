@@ -12,7 +12,7 @@ if errorlevel 1 (
 
 echo ========================================
 echo   成本计算器构建脚本
-echo   Building CostCalculator.exe
+echo   Building CostCalculator.exe + RemarkTester.exe
 echo ========================================
 echo.
 
@@ -99,20 +99,13 @@ echo [完成] 系统选择窗口组件可用
 REM 固定 rich 版本，避免 PyInstaller + rich 14.x 在 onefile 下的 Unicode 子模块导入问题
 "!PY_CMD!" -m pip install --disable-pip-version-check --quiet rich==13.9.4
 
-REM 清理旧的构建文件
+REM 保留 dist 中的外部配置及使用者数据，由 PyInstaller 覆盖对应构建产物
 echo.
-echo [清理] 删除旧的构建文件...
-if exist "build" (
-    rmdir /s /q "build"
-    echo [完成] 已删除 build 目录
-)
-if exist "dist" (
-    rmdir /s /q "dist"
-    echo [完成] 已删除 dist 目录
-)
-if exist "CostCalculator.spec" (
-    del /q "CostCalculator.spec"
-    echo [完成] 已删除 CostCalculator.spec
+echo [检查] 检查内嵌配置模板...
+if not exist "成本配置模板.xlsx" (
+    echo [错误] 找不到成本配置模板.xlsx
+    pause
+    exit /b 1
 )
 
 echo.
@@ -141,12 +134,34 @@ if %errorlevel% neq 0 (
     exit /b %errorlevel%
 )
 
+echo.
+echo [构建] 备注识别测试工具...
+"!PY_CMD!" -m PyInstaller --onefile ^
+    --name RemarkTester ^
+    --icon=NONE ^
+    --clean ^
+    --noconfirm ^
+    --console ^
+    --hidden-import textual ^
+    --hidden-import rich ^
+    --add-data "成本配置模板.xlsx;." ^
+    remark_tester.py
+
+if %errorlevel% neq 0 (
+    echo.
+    echo [错误] RemarkTester 构建失败！请检查上面的错误信息。
+    pause
+    exit /b %errorlevel%
+)
+
 REM 复制测试数据目录到 dist，便于开箱验证
 if exist "test_excel" (
-    if exist "dist\test_excel" (
-        rmdir /s /q "dist\test_excel"
-    )
     xcopy /e /i /y "test_excel" "dist\test_excel" >nul
+    if !errorlevel! geq 2 (
+        echo [错误] 测试数据复制失败
+        pause
+        exit /b 1
+    )
     echo [完成] 已复制 test_excel 到 dist\test_excel
 ) else (
     echo [提示] 未找到 test_excel 目录，跳过复制
@@ -161,6 +176,7 @@ echo 输出目录: dist\
 echo.
 echo 可执行文件:
 echo   - CostCalculator.exe
+echo   - RemarkTester.exe
 echo.
 echo 配置文件:
 echo   - 已内嵌成本配置模板.xlsx
@@ -171,11 +187,13 @@ echo   - 生成两个Sheet: 成本明细 + 店铺统计
 echo   - 支持多种成本类型计算
 echo   - 成本明细包含无法匹配原因说明
 echo   - 使用Excel公式实现动态更新
+echo   - 备注测试无需订单表格，可查看命中规格、成本和失败原因
 echo.
 echo 使用方法:
 echo   1. 将 Excel 文件拖放到 CostCalculator.exe 上
 echo   2. Start exe, then input a path or use the system file/folder picker
 echo   3. 处理完成后在结果表和日志区查看结果
+echo   4. 打开 RemarkTester.exe 或主程序中的“备注测试”，粘贴备注后点击识别
 echo.
 echo 输入要求:
 echo   - Excel文件必须包含 卖家备注 和 商家/店铺 列
@@ -188,3 +206,4 @@ echo   - Sheet2: 店铺统计 (按店铺汇总 + 合计行)
 echo.
 
 pause
+exit /b 0

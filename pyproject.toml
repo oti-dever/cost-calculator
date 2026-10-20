@@ -12,6 +12,7 @@ authors = [
 [project.scripts]
 cost-calculator = "cost_calculator:main"
 cost-calculator-tui = "textual_app:main"
+remark-tester = "remark_tester:main"
 
 [build-system]
 requires = ["setuptools>=42", "wheel"]

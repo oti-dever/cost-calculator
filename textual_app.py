@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import List, Literal
 
@@ -27,6 +25,8 @@ from textual.widgets import (
 from calculator_service import CostCalculatorService
 from config_workbook import ensure_editable_config
 from cost_calculator import ProcessResult
+from remark_tester import RemarkTesterScreen
+from ui_helpers import open_with_default_app as _open_with_default_app
 
 
 PickerMode = Literal["file", "directory"]
@@ -118,19 +118,6 @@ def _show_system_target_dialog(
     if not selected_path:
         return None
     return os.path.normpath(str(selected_path))
-
-
-def _open_with_default_app(path: str | Path) -> None:
-    """使用操作系统默认应用打开文件。"""
-
-    resolved = str(Path(path).resolve())
-    if hasattr(os, "startfile"):
-        os.startfile(resolved)  # type: ignore[attr-defined]
-        return
-    if sys.platform == "darwin":
-        subprocess.Popen(["open", resolved])
-        return
-    subprocess.Popen(["xdg-open", resolved])
 
 
 class LogDetailScreen(ModalScreen[None]):
@@ -287,6 +274,11 @@ class CostCalculatorTextualApp(App[None]):
         margin-top: 1;
     }
 
+    #actions Button {
+        width: auto;
+        min-width: 12;
+    }
+
     #result-table {
         height: 10;
         margin-top: 1;
@@ -357,6 +349,7 @@ class CostCalculatorTextualApp(App[None]):
                     yield Button("打开配置", id="open-config-btn", variant="primary")
                     yield Button("清空日志", id="clear-log-btn", variant="primary")
                     yield Button("查看日志详情", id="show-log-detail-btn")
+                    yield Button("备注测试", id="remark-test-btn")
 
             yield DataTable(id="result-table")
             yield Static("结果详情：请选择一条结果记录", id="result-detail")
@@ -411,6 +404,12 @@ class CostCalculatorTextualApp(App[None]):
         """显示日志详情弹窗。"""
 
         self.push_screen(LogDetailScreen(self.latest_results))
+
+    @on(Button.Pressed, "#remark-test-btn")
+    def show_remark_tester(self) -> None:
+        """使用独立服务打开备注测试，保留当前批处理界面。"""
+
+        self.push_screen(RemarkTesterScreen())
 
     @on(Button.Pressed, "#select-file-btn")
     def choose_target_file(self) -> None:

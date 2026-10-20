@@ -19,7 +19,7 @@ from config_workbook import (
     ensure_editable_config,
     load_config_workbook,
 )
-from cost_calculator import ProcessResult, process_excel_file
+from cost_calculator import MatchResult, ProcessResult, process_excel_file, recognize_note
 
 
 LogFunc = Callable[[str], None]
@@ -36,6 +36,7 @@ class CostCalculatorService:
         """确保外部配置存在，加载、校验并缓存快照。"""
 
         logger = log or (lambda _msg: None)
+        self.config = None
         config_path = ensure_editable_config()
         logger(f"正在加载成本配置：{config_path}")
         config = load_config_workbook(config_path)
@@ -49,6 +50,16 @@ class CostCalculatorService:
 
         self.config = config
         return self.config
+
+    def recognize_note(self, text: str) -> MatchResult:
+        """使用最新保存的配置识别单条备注，不生成订单文件。"""
+
+        cfg = self.load_configs()
+        return recognize_note(
+            text, cfg.price_data, cfg.moving_costs_data, cfg.pillow_cost_data,
+            cfg.others_cost_data, cfg.dropship_unit_cost, cfg.dropship_keywords,
+            collect_details=True, pillow_metadata=cfg.pillow_metadata,
+        )
 
     @staticmethod
     def parse_target_input(raw_input: str, cwd: Optional[str] = None) -> List[str]:

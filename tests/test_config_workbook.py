@@ -30,7 +30,7 @@ class ConfigWorkbookTests(unittest.TestCase):
         config = load_config_workbook(TEMPLATE, check_lock=False)
 
         self.assertEqual(4, len(config.price_data))
-        self.assertEqual(17, sum(len(item["keywords"]) for item in config.price_data))
+        self.assertEqual(27, sum(len(item["keywords"]) for item in config.price_data))
         self.assertEqual(
             89,
             sum(

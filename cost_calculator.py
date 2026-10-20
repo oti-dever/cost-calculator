@@ -84,6 +84,26 @@ class ProcessResult:
 
 
 @dataclass
+class MatchDetail:
+    """匹配分支实际采用的规格与价格；included 表示最终是否计入。"""
+
+    segment_index: int
+    cost_type: str
+    keyword: str
+    quantity: int
+    unit_cost: float
+    category: str = ""
+    size: str = ""
+    material: str = ""
+    segment_text: str = ""
+    included: bool = True
+
+    @property
+    def subtotal(self) -> float:
+        return self.quantity * self.unit_cost
+
+
+@dataclass
 class MatchResult:
     """卖家备注的成本匹配结果及字段级诊断。"""
 
@@ -95,6 +115,8 @@ class MatchResult:
     other_cost: Optional[float]
     matched_any: bool = False
     failure_reasons: List[str] = field(default_factory=list)
+    details: List[MatchDetail] = field(default_factory=list)
+    is_overseas: bool = False
 
     def as_tuple(self):
         """返回与旧版 ``match_price`` 一致的六元组。"""
@@ -353,6 +375,9 @@ def match_price_detailed(
     others_cost_data=None,
     dropship_unit_cost: float = 5.5,
     dropship_keywords: Optional[Sequence[str]] = None,
+    *,
+    collect_details: bool = False,
+    pillow_metadata: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
 ) -> MatchResult:
     """匹配一条卖家备注，并返回成本及字段级失败原因。"""
 
@@ -391,6 +416,7 @@ def match_price_detailed(
     fatal_base_error = False
     matched_any = False
     failure_reasons: List[str] = []
+    details: Optional[List[MatchDetail]] = [] if collect_details else None
 
     sorted_categories = sorted(price_data, key=lambda x: x.get("priority", 999))
 
@@ -452,6 +478,13 @@ def match_price_detailed(
                 quantity = 1
             total_base_cost += item_price * quantity
             matched_any = True
+            if details is not None:
+                details.append(MatchDetail(
+                    item_index, "base_cost", str(matched_keyword), quantity,
+                    item_price, category=str(category_data.get("category", "")),
+                    size=str(matched_product.get("尺寸", "")),
+                    material=str(matched_material[0]),
+                ))
         else:
             base_failure = _diagnose_base_failure(
                 item_text_lower,
@@ -476,11 +509,19 @@ def match_price_detailed(
         total_dropship_cost += extra_cost
         if extra_count > 0:
             matched_any = True
+            if details is not None:
+                for keyword in effective_dropship_keywords:
+                    count = item_text_lower.count(str(keyword).lower()) if str(keyword) else 0
+                    if count:
+                        details.append(MatchDetail(
+                            item_index, "dropship_cost", str(keyword), count,
+                            float(dropship_unit_cost),
+                        ))
 
         moving_triggered = bool(re.search(r"yr|yt", item_text_lower))
         if moving_costs_data:
             item_moving_cost = calculate_moving_cost_for_item(
-                item_text, moving_costs_data
+                item_text, moving_costs_data, details=details, segment_index=item_index
             )
             if item_moving_cost is None:
                 moving_has_error = True
@@ -496,7 +537,8 @@ def match_price_detailed(
         pillow_triggered = "枕芯" in item_text_lower
         if pillow_cost_data:
             item_pillow_cost = calculate_pillow_cost_for_item(
-                item_text, pillow_cost_data
+                item_text, pillow_cost_data, details=details, segment_index=item_index,
+                pillow_metadata=pillow_metadata,
             )
             if item_pillow_cost is None:
                 pillow_has_error = True
@@ -516,7 +558,7 @@ def match_price_detailed(
         )
         if others_cost_data:
             total_others_cost += calculate_others_cost_for_item(
-                item_text, others_cost_data
+                item_text, others_cost_data, details=details, segment_index=item_index
             )
         if other_triggered:
             matched_any = True
@@ -542,6 +584,14 @@ def match_price_detailed(
             f"第1段：未识别任何可计费项目（片段：{_reason_fragment(original_text)}）"
         )
 
+    for detail in details or []:
+        detail.segment_text = raw_items[detail.segment_index - 1]
+        detail.included = not (
+            fatal_base_error or not matched_any
+            or (detail.cost_type == "moving_cost" and moving_has_error)
+            or (detail.cost_type == "pillow_cost" and pillow_has_error)
+        )
+
     if fatal_base_error or not matched_any:
         return MatchResult(
             None,
@@ -552,6 +602,7 @@ def match_price_detailed(
             None,
             matched_any=matched_any,
             failure_reasons=failure_reasons,
+            details=details or [],
         )
 
     final_moving_cost = None if moving_has_error else total_moving_cost
@@ -567,6 +618,33 @@ def match_price_detailed(
         total_others_cost,
         matched_any=matched_any,
         failure_reasons=failure_reasons,
+        details=details or [],
+    )
+
+
+def recognize_note(
+    text,
+    price_data,
+    moving_costs_data=None,
+    pillow_cost_data=None,
+    others_cost_data=None,
+    dropship_unit_cost: float = 5.5,
+    dropship_keywords: Optional[Sequence[str]] = None,
+    *,
+    collect_details: bool = False,
+    pillow_metadata: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
+) -> MatchResult:
+    """Excel 和备注测试共用的单条入口，先处理海外订单。"""
+
+    if not pd.isna(text) and "发海外" in str(text).lower():
+        return MatchResult(
+            None, None, None, None, None, None,
+            failure_reasons=["发海外，成本需人工核对填写"], is_overseas=True,
+        )
+    return match_price_detailed(
+        text, price_data, moving_costs_data, pillow_cost_data, others_cost_data,
+        dropship_unit_cost, dropship_keywords,
+        collect_details=collect_details, pillow_metadata=pillow_metadata,
     )
 
 
@@ -596,7 +674,9 @@ def match_price(
         dropship_keywords=dropship_keywords,
     ).as_tuple()
 
-def calculate_moving_cost_for_item(item_text, moving_costs_data):
+def calculate_moving_cost_for_item(
+    item_text, moving_costs_data, *, details=None, segment_index=1,
+):
     """
     为单个订单项计算义乳/义臀成本（严格匹配）
 
@@ -682,6 +762,11 @@ def calculate_moving_cost_for_item(item_text, moving_costs_data):
             # 在搜索范围内查找remark
             if remark in search_text:
                 item_cost += cost
+                if details is not None:
+                    details.append(MatchDetail(
+                        segment_index, "moving_cost", remark, 1, cost,
+                        category="义乳" if keyword == "yr" else "义臀",
+                    ))
                 matched = True
                 break
 
@@ -692,7 +777,10 @@ def calculate_moving_cost_for_item(item_text, moving_costs_data):
     return item_cost
 
 
-def calculate_pillow_cost_for_item(item_text, pillow_cost_data):
+def calculate_pillow_cost_for_item(
+    item_text, pillow_cost_data, *, details=None, segment_index=1,
+    pillow_metadata=None,
+):
     """
     为单个订单项计算枕芯成本（严格匹配）
 
@@ -776,6 +864,14 @@ def calculate_pillow_cost_for_item(item_text, pillow_cost_data):
 
                     if re.search(pattern, search_text):
                         item_cost += keywords[keyword]
+                        if details is not None:
+                            metadata = (pillow_metadata or {}).get((size, keyword), {})
+                            details.append(MatchDetail(
+                                segment_index, "pillow_cost", keyword, 1,
+                                float(keywords[keyword]),
+                                category=metadata.get("style", "枕芯"), size=size,
+                                material=metadata.get("material", ""),
+                            ))
                         matched = True
                         break
 
@@ -792,7 +888,9 @@ def calculate_pillow_cost_for_item(item_text, pillow_cost_data):
     return item_cost
 
 
-def calculate_others_cost_for_item(item_text, others_cost_data):
+def calculate_others_cost_for_item(
+    item_text, others_cost_data, *, details=None, segment_index=1,
+):
     """
     为单个订单项计算硅胶/电动成本
 
@@ -828,6 +926,10 @@ def calculate_others_cost_for_item(item_text, others_cost_data):
     for remark, cost in sorted_remarks:
         if remark in item_lower:
             item_cost += cost
+            if details is not None:
+                details.append(MatchDetail(
+                    segment_index, "other_cost", remark, 1, cost,
+                ))
             # 只匹配一次最长的
             break
 
@@ -1073,7 +1175,11 @@ def process_cost_detail_sheet(
         sheet.cell(
             row=row_index,
             column=grand_total_col_idx,
-            value=f"=IFERROR({get_column_letter(cost_col_idx)}{row_index}+{get_column_letter(dropship_col_idx)}{row_index},0)",
+            value=(
+                f"=IFERROR({get_column_letter(cost_col_idx)}{row_index}+{get_column_letter(dropship_col_idx)}{row_index},0)"
+                if base_cost not in (None, "") or dropship_cost not in (None, "")
+                else ""
+            ),
         )
         # 空列留空
         sheet.cell(row=row_index, column=empty_col_idx, value="")
@@ -1207,8 +1313,11 @@ def process_excel_file(
             seller_note = str(row["卖家备注"]) if not pd.isna(row["卖家备注"]) else ""
             shop_column = str(row["商家/店铺"]) if not pd.isna(row["商家/店铺"]) else ""
 
-            # 检查是否包含“发海外”关键词（忽略大小写）
-            is_overseas = "发海外" in seller_note.lower()
+            match_result = recognize_note(
+                seller_note, price_data, moving_costs_data, pillow_cost_data,
+                others_cost_data, dropship_unit_cost, dropship_keywords,
+            )
+            is_overseas = match_result.is_overseas
 
             if is_overseas:
                 # 如果是海外订单，所有字段置空
@@ -1218,21 +1327,12 @@ def process_excel_file(
                 pillow_costs.append("")
                 others_costs.append("")
                 grand_total_costs.append("")
-                match_reasons.append("发海外，成本需人工核对填写")
+                match_reasons.append("；".join(match_result.failure_reasons))
                 unmatched_flags.append(False)
                 shop_names.append("")
                 overseas_count += 1
             else:
                 # 成本匹配：仅从卖家备注中匹配，同时生成字段级诊断。
-                match_result = match_price_detailed(
-                    seller_note,
-                    price_data,
-                    moving_costs_data,
-                    pillow_cost_data,
-                    others_cost_data,
-                    dropship_unit_cost=dropship_unit_cost,
-                    dropship_keywords=dropship_keywords,
-                )
                 (
                     base_cost,
                     dropship_cost,

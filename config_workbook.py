@@ -11,7 +11,7 @@ import re
 import shutil
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 from zipfile import BadZipFile
@@ -92,6 +92,7 @@ class CostConfig:
     dropship_unit_cost: float
     dropship_keywords: Tuple[str, ...]
     source_path: Path
+    pillow_metadata: Dict[Tuple[str, str], Dict[str, str]] = field(default_factory=dict)
 
 
 def _application_dir() -> Path:
@@ -800,6 +801,7 @@ def load_config_workbook(path: str | Path, *, check_lock: bool = True) -> CostCo
             config_path, workbook[PILLOW_PRICE_SHEET]
         )
         pillow_cost_data: Dict[str, Dict[str, int | float]] = {}
+        pillow_metadata: Dict[Tuple[str, str], Dict[str, str]] = {}
         pillow_keys: set[Tuple[str, str]] = set()
         pillow_row_keys: set[Tuple[str, str]] = set()
         for row_index, row in pillow_rows:
@@ -847,6 +849,10 @@ def load_config_workbook(path: str | Path, *, check_lock: bool = True) -> CostCo
                     )
                 pillow_keys.add(key)
                 pillow_cost_data.setdefault(size, {})[keyword] = cost
+                pillow_metadata[(size, keyword)] = {
+                    "material": material,
+                    "style": style_header,
+                }
 
         if not pillow_cost_data:
             _raise_config_error(config_path, "至少需要一条枕芯价格", PILLOW_PRICE_SHEET)
@@ -952,6 +958,7 @@ def load_config_workbook(path: str | Path, *, check_lock: bool = True) -> CostCo
             dropship_unit_cost=dropship_unit_cost,
             dropship_keywords=DROPSHIP_KEYWORDS,
             source_path=config_path,
+            pillow_metadata=pillow_metadata,
         )
     finally:
         workbook.close()
