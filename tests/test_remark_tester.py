@@ -163,7 +163,7 @@ class RemarkServiceTests(unittest.TestCase):
             shutil.copyfile(TEMPLATE, target)
             service = CostCalculatorService()
             with patch.object(calculator_service, "ensure_editable_config", return_value=target):
-                self.assertEqual(26, service.recognize_note("枕芯50150").pillow_cost)
+                self.assertEqual(29, service.recognize_note("枕芯50150").pillow_cost)
                 workbook = load_workbook(target)
                 sheet = workbook["枕芯价格"]
                 for row in sheet.iter_rows(min_row=2):
@@ -186,7 +186,7 @@ class RemarkServiceTests(unittest.TestCase):
                     service.recognize_note("枕芯50150")
                 self.assertIsNone(service.config)
                 shutil.copyfile(TEMPLATE, target)
-                self.assertEqual(26, service.recognize_note("枕芯50150").pillow_cost)
+                self.assertEqual(29, service.recognize_note("枕芯50150").pillow_cost)
 
 
 class RemarkInterfaceTests(unittest.IsolatedAsyncioTestCase):

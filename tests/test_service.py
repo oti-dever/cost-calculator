@@ -29,7 +29,7 @@ class ServiceConfigReloadTests(unittest.TestCase):
                 return_value=config_path,
             ):
                 first = service.load_configs()
-                self.assertEqual(18, first.pillow_cost_data["120*40"]["枕芯"])
+                self.assertEqual(19, first.pillow_cost_data["120*40"]["枕芯"])
 
                 workbook = load_workbook(config_path)
                 worksheet = workbook["枕芯价格"]
@@ -38,14 +38,14 @@ class ServiceConfigReloadTests(unittest.TestCase):
                         worksheet.cell(row, 1).value == "120*40"
                         and worksheet.cell(row, 2).value == "PP棉"
                     ):
-                        worksheet.cell(row, 3, 19)
+                        worksheet.cell(row, 3, 20)
                         break
                 workbook.save(config_path)
                 workbook.close()
 
                 self.assertEqual([], service.process_targets([], None, False))
                 self.assertEqual(
-                    19, service.config.pillow_cost_data["120*40"]["枕芯"]
+                    20, service.config.pillow_cost_data["120*40"]["枕芯"]
                 )
 
 

@@ -29,14 +29,14 @@ class MatchingTests(unittest.TestCase):
             config.dropship_keywords,
         )
 
-    def test_existing_cost_examples_are_unchanged(self) -> None:
+    def test_cost_examples_use_updated_pillow_prices(self) -> None:
         cases = {
-            "B-14257，短毛绒50150枕套+枕芯50150": (20.0, 5.5, 26.0),
-            "H067732B，SSS60180KK枕套+KK枕芯60180": (73.0, 5.5, 45.0),
+            "B-14257，短毛绒50150枕套+枕芯50150": (20.0, 5.5, 29.0),
+            "H067732B，SSS60180KK枕套+KK枕芯60180": (73.0, 5.5, 49.0),
             "C063756B，2way40120枕套＋加重羽绒棉枕芯40120＋香水": (
                 23.0,
                 5.5,
-                30.0,
+                32.0,
             ),
         }
         for note, expected in cases.items():
@@ -68,7 +68,7 @@ class MatchingTests(unittest.TestCase):
         )
         self.assertIsInstance(result, tuple)
         self.assertEqual(6, len(result))
-        self.assertEqual(26.0, result[4])
+        self.assertEqual(29.0, result[4])
 
     def test_field_level_reasons(self) -> None:
         cases = {
