@@ -17,7 +17,7 @@ class MatchingTests(unittest.TestCase):
             ROOT / "成本配置模板.xlsx", check_lock=False
         )
 
-    def detailed(self, note: str):
+    def detailed(self, note: str, *, collect_details: bool = False):
         config = self.config
         return match_price_detailed(
             note,
@@ -27,7 +27,60 @@ class MatchingTests(unittest.TestCase):
             config.others_cost_data,
             config.dropship_unit_cost,
             config.dropship_keywords,
+            collect_details=collect_details,
         )
+
+    def test_merged_category_keywords_use_shared_price_matrix(self) -> None:
+        keywords = (
+            "分腿等身枕套", "ft等身枕套", "分腿枕套", "ft枕套", "ft不开孔枕套",
+            "开胸开孔枕套", "kxkk枕套", "开孔开胸枕套", "kkkx枕套",
+            "功能版枕套", "功能枕套", "开孔等身枕套", "kk等身枕套", "开孔枕套",
+            "kk枕套", "开胸等身枕套", "kx等身枕套", "开胸枕套", "kx枕套",
+        )
+        sizes = ("40*120", "50*150", "50*160", "60*180")
+        prices = {
+            "桃皮绒": (22, 26, 30, 35),
+            "短毛绒": (22, 26, 30, 35),
+            "2way": (28, 32, 35, 45),
+            "new2way": (38, 41, 45, 57),
+            "SSS": (50, 56, 57, 73),
+        }
+        for keyword in keywords:
+            for material, costs in prices.items():
+                for size, expected in zip(sizes, costs):
+                    with self.subTest(keyword=keyword, material=material, size=size):
+                        result = self.detailed(
+                            f"B-1，{material}{size}{keyword}", collect_details=True
+                        )
+                        self.assertEqual([], result.failure_reasons)
+                        self.assertEqual(float(expected), result.base_cost)
+                        self.assertEqual(float(expected), result.total_cost)
+                        detail, = result.details
+                        self.assertEqual("开孔/开胸/开孔开胸/分腿枕套", detail.category)
+                        self.assertEqual(keyword, detail.keyword)
+                        self.assertEqual(material, detail.material)
+                        self.assertTrue(detail.included)
+
+    def test_merged_category_has_priority_over_generic_pillowcase(self) -> None:
+        for keyword in ("ft枕套", "开孔枕套", "开胸枕套", "开孔开胸枕套"):
+            with self.subTest(keyword=keyword):
+                result = self.detailed(
+                    f"B-1，桃皮绒50150枕套+{keyword}", collect_details=True
+                )
+                self.assertEqual([], result.failure_reasons)
+                self.assertEqual(26.0, result.base_cost)
+                self.assertEqual("开孔/开胸/开孔开胸/分腿枕套", result.details[0].category)
+
+    def test_merged_category_quantities_and_segments(self) -> None:
+        result = self.detailed(
+            "B-1，B-2，短毛绒50150FT枕套。B-3，2WAY50X160开胸枕套",
+            collect_details=True,
+        )
+        self.assertEqual([], result.failure_reasons)
+        self.assertEqual(87.0, result.base_cost)
+        self.assertEqual(87.0, result.total_cost)
+        self.assertEqual([2, 1], [detail.quantity for detail in result.details])
+        self.assertEqual([26.0, 35.0], [detail.unit_cost for detail in result.details])
 
     def test_cost_examples_use_updated_pillow_prices(self) -> None:
         cases = {

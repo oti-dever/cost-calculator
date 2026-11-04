@@ -26,13 +26,17 @@ class ConfigWorkbookTests(unittest.TestCase):
         shutil.copyfile(TEMPLATE, target)
         return target
 
-    def test_template_contains_all_migrated_data(self) -> None:
+    def test_template_contains_updated_categories_and_prices(self) -> None:
         config = load_config_workbook(TEMPLATE, check_lock=False)
 
-        self.assertEqual(4, len(config.price_data))
+        self.assertEqual(
+            ["开孔/开胸/开孔开胸/分腿枕套", "等身枕套", "遮羞套"],
+            [item["category"] for item in config.price_data],
+        )
+        self.assertEqual(19, len(config.price_data[0]["keywords"]))
         self.assertEqual(27, sum(len(item["keywords"]) for item in config.price_data))
         self.assertEqual(
-            89,
+            69,
             sum(
                 len(product["价格"])
                 for item in config.price_data
