@@ -250,6 +250,8 @@ class CostCalculatorService:
                 dropship_keywords=cfg.dropship_keywords,
                 output_dir=output_dir,
                 overwrite=overwrite,
+                pillow_metadata=cfg.pillow_metadata,
+                usage_template=cfg.usage_template,
             )
 
         captured = buffer.getvalue().strip()

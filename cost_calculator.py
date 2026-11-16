@@ -16,7 +16,7 @@ Excel文件处理脚本 - 成本计算与店铺统计
    - 自动从"商家/店铺"列提取店铺名称（去空白、规范化处理）
    - 不再依赖shop.json配置文件
 
-3. 输出结构（两个Sheet）
+3. 输出结构（四个Sheet）
    a) 成本明细Sheet
       - 保留原始数据的所有列
       - 新增列：成本、代发成本、总成本（=成本+代发成本）
@@ -28,6 +28,10 @@ Excel文件处理脚本 - 成本计算与店铺统计
       - 使用SUMIF公式动态引用成本明细Sheet数据
       - 支持手动修改成本明细后自动更新统计
       - 底部添加合计行
+
+   c) 抱枕规格用量统计、枕芯规格用量统计
+      - 按配置价格矩阵布局汇总有效计费明细的数量
+      - 无用量填0，不支持的规格留空，统计值为本次处理的静态数量
 
 4. 特殊处理
    - 海外订单：包含"发海外"关键词的订单，所有成本列置空，需手动补全
@@ -50,7 +54,7 @@ Excel文件处理脚本 - 成本计算与店铺统计
 3. 打包为exe后拖拽Excel文件到exe图标上运行
 
 版本信息：
-- 支持多Sheet输出（成本明细 + 店铺统计）
+- 支持多Sheet输出（成本明细 + 店铺统计 + 两张规格用量统计）
 - 支持多种成本类型计算
 - 使用Excel公式实现动态更新
 ================================================================================
@@ -58,6 +62,7 @@ Excel文件处理脚本 - 成本计算与店铺统计
 
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -65,6 +70,8 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 import pandas as pd
+
+from usage_statistics import collect_usage, write_usage_sheets
 
 
 @dataclass
@@ -1266,6 +1273,9 @@ def process_excel_file(
     dropship_keywords=None,
     output_dir=None,
     overwrite=False,
+    *,
+    pillow_metadata=None,
+    usage_template=None,
 ):
     """处理单个Excel文件，输出到新文件。"""
     print(f"处理文件: {file_path}")
@@ -1308,6 +1318,7 @@ def process_excel_file(
         shop_names = []  # 店铺名称（直接使用"商家/店铺"列去空白）
         overseas_count = 0  # 海外订单计数
         unmatched_records = []  # 未匹配记录明细
+        usage_quantities = Counter()
 
         for row_number, (_idx, row) in enumerate(df.iterrows(), start=2):
             seller_note = str(row["卖家备注"]) if not pd.isna(row["卖家备注"]) else ""
@@ -1316,7 +1327,9 @@ def process_excel_file(
             match_result = recognize_note(
                 seller_note, price_data, moving_costs_data, pillow_cost_data,
                 others_cost_data, dropship_unit_cost, dropship_keywords,
+                collect_details=True, pillow_metadata=pillow_metadata,
             )
+            collect_usage(usage_quantities, match_result.details, pillow_metadata or {})
             is_overseas = match_result.is_overseas
 
             if is_overseas:
@@ -1494,7 +1507,10 @@ def process_excel_file(
                     get_column_letter(others_col_idx),  # 硅胶/电动成本列字母
                 )
 
+            write_usage_sheets(workbook, usage_quantities, price_data, pillow_cost_data,
+                               pillow_metadata, usage_template)
             workbook.save(output_file_path)
+            workbook.close()
             print(f"已保存处理后的文件: {output_file_path}")
         else:
             # 对于 .xls 文件，使用 pandas 写入，强制输出为 .xlsx
@@ -1515,6 +1531,8 @@ def process_excel_file(
                         sheet.cell(
                             row=row_index, column=column_index
                         ).fill = UNMATCHED_ROW_FILL
+            write_usage_sheets(workbook, usage_quantities, price_data, pillow_cost_data,
+                               pillow_metadata, usage_template)
             workbook.save(output_file_path)
             workbook.close()
             print(f"已保存处理后的文件: {output_file_path}")

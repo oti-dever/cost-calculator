@@ -30,13 +30,13 @@ class ConfigWorkbookTests(unittest.TestCase):
         config = load_config_workbook(TEMPLATE, check_lock=False)
 
         self.assertEqual(
-            ["开孔/开胸/开孔开胸/分腿枕套", "等身枕套", "遮羞套"],
+            ["分腿枕套", "开孔开胸枕套", "开孔枕套", "开胸枕套", "等身枕套", "遮羞套"],
             [item["category"] for item in config.price_data],
         )
-        self.assertEqual(19, len(config.price_data[0]["keywords"]))
+        self.assertEqual(19, sum(len(item["keywords"]) for item in config.price_data[:4]))
         self.assertEqual(27, sum(len(item["keywords"]) for item in config.price_data))
         self.assertEqual(
-            69,
+            129,
             sum(
                 len(product["价格"])
                 for item in config.price_data

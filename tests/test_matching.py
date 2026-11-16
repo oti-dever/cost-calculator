@@ -30,7 +30,7 @@ class MatchingTests(unittest.TestCase):
             collect_details=collect_details,
         )
 
-    def test_merged_category_keywords_use_shared_price_matrix(self) -> None:
+    def test_split_category_keywords_preserve_prices(self) -> None:
         keywords = (
             "分腿等身枕套", "ft等身枕套", "分腿枕套", "ft枕套", "ft不开孔枕套",
             "开胸开孔枕套", "kxkk枕套", "开孔开胸枕套", "kkkx枕套",
@@ -56,22 +56,31 @@ class MatchingTests(unittest.TestCase):
                         self.assertEqual(float(expected), result.base_cost)
                         self.assertEqual(float(expected), result.total_cost)
                         detail, = result.details
-                        self.assertEqual("开孔/开胸/开孔开胸/分腿枕套", detail.category)
+                        if keyword.startswith(("分腿", "ft")):
+                            category = "分腿枕套"
+                        elif keyword.startswith(("开胸开孔", "kxkk", "开孔开胸", "kkkx", "功能")):
+                            category = "开孔开胸枕套"
+                        elif keyword.startswith(("开孔", "kk")):
+                            category = "开孔枕套"
+                        else:
+                            category = "开胸枕套"
+                        self.assertEqual(category, detail.category)
                         self.assertEqual(keyword, detail.keyword)
                         self.assertEqual(material, detail.material)
                         self.assertTrue(detail.included)
 
-    def test_merged_category_has_priority_over_generic_pillowcase(self) -> None:
-        for keyword in ("ft枕套", "开孔枕套", "开胸枕套", "开孔开胸枕套"):
+    def test_split_categories_have_priority_over_generic_pillowcase(self) -> None:
+        for keyword, category in (("ft枕套", "分腿枕套"), ("开孔枕套", "开孔枕套"),
+                                  ("开胸枕套", "开胸枕套"), ("开孔开胸枕套", "开孔开胸枕套")):
             with self.subTest(keyword=keyword):
                 result = self.detailed(
                     f"B-1，桃皮绒50150枕套+{keyword}", collect_details=True
                 )
                 self.assertEqual([], result.failure_reasons)
                 self.assertEqual(26.0, result.base_cost)
-                self.assertEqual("开孔/开胸/开孔开胸/分腿枕套", result.details[0].category)
+                self.assertEqual(category, result.details[0].category)
 
-    def test_merged_category_quantities_and_segments(self) -> None:
+    def test_split_category_quantities_and_segments(self) -> None:
         result = self.detailed(
             "B-1，B-2，短毛绒50150FT枕套。B-3，2WAY50X160开胸枕套",
             collect_details=True,

@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import uuid
+from io import BytesIO
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -93,6 +94,7 @@ class CostConfig:
     dropship_keywords: Tuple[str, ...]
     source_path: Path
     pillow_metadata: Dict[Tuple[str, str], Dict[str, str]] = field(default_factory=dict)
+    usage_template: bytes = b""
 
 
 def _application_dir() -> Path:
@@ -950,6 +952,9 @@ def load_config_workbook(path: str | Path, *, check_lock: bool = True) -> CostCo
         price_data = sorted(
             categories.values(), key=lambda item: item["priority"]
         )
+        # 保存本次校验后的布局，批次中途修改配置不会影响用量报表。
+        usage_template = BytesIO()
+        workbook.save(usage_template)
         return CostConfig(
             price_data=price_data,
             moving_costs_data=moving_costs_data,
@@ -959,6 +964,7 @@ def load_config_workbook(path: str | Path, *, check_lock: bool = True) -> CostCo
             dropship_keywords=DROPSHIP_KEYWORDS,
             source_path=config_path,
             pillow_metadata=pillow_metadata,
+            usage_template=usage_template.getvalue(),
         )
     finally:
         workbook.close()

@@ -58,6 +58,12 @@ class ServiceConfigReloadTests(unittest.TestCase):
             workbook = load_workbook(output.output_path)
             try:
                 self.assertIn("店铺统计", workbook.sheetnames)
+                self.assertIn("抱枕规格用量统计", workbook.sheetnames)
+                self.assertIn("枕芯规格用量统计", workbook.sheetnames)
+                usage = workbook["抱枕规格用量统计"]
+                row = next(row for row in usage.iter_rows(min_row=2)
+                           if row[0].value == "分腿枕套" and row[1].value == "桃皮绒")
+                self.assertEqual(1, row[3].value)
                 sheet = workbook["成本明细"]
                 headers = {cell.value: cell.column for cell in sheet[1]}
                 for row, (_note, base, dropship, pillow) in enumerate(cases, start=2):
